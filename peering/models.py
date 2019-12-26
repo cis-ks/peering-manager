@@ -314,7 +314,7 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         else:
             return prefixes
     
-    def get_irr_as_prefixes(self, asn=self.asn, address_family=0):
+    def get_irr_as_prefixes(self, asn, address_family=0):
         """
         Return a prefix list for the given asn only. If none is provided the list
         will be empty.
@@ -323,6 +323,9 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         returned. 6 for IPv6, 4 for IPv4, both for all other values.
         """
         prefixes = {"ipv6": [], "ipv4": []}
+
+        if not asn:
+            asn=self.asn
 
         prefixes["ipv6"].extend(call_irr_as_resolver(asn, ip_version=6))
         prefixes["ipv4"].extend(call_irr_as_resolver(asn, ip_version=4))
@@ -341,8 +344,9 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         as_sets = parse_irr_as_set(self.asn, self.irr_as_set)
         asns = {"ipv6": [], "ipv4": []}
 
-        asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(irr_as_set=as_sets, ip_version=6))
-        asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(irr_as_set=as_sets, ip_version=4))
+        for as_set in as_sets:
+            asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(as_set, ip_version=6))
+            asns["ipv4"].extend(call_irr_as_set_to_asn_resolver(as_set, ip_version=4))
 
         if address_family == 6:
             return asns["ipv6"]
@@ -351,6 +355,41 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         else:
             return asns
 
+    def get_irr_asset_collection_asns(self, ascollection, address_family=0):
+        """
+        Return an ASN-List for a Collection of ASses and their AS-Sets
+        """
+        as_sets = []
+        asns = {"ipv6": [], "ipv4": []}
+
+        for autonomous_system in list(ascollection):
+            as_sets.extend(parse_irr_as_set(autonomous_system["asn"], autonomous_system["irr_as_set"]))
+
+        # Unifiying the AS-SET-list
+        as_sets.sort()
+        as_temp = set(as_sets)
+        as_sets = list(as_temp)
+
+        for as_set in as_sets:
+            asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(as_set, ip_version=6))
+            asns["ipv4"].extend(call_irr_as_set_to_asn_resolver(as_set, ip_version=4))
+        
+        # # Sorting and unifiying the ASN-Lists
+        asns["ipv6"].sort()
+        asns["ipv4"].sort()
+
+        asns_temp = set(list(asns["ipv6"]))
+        asns["ipv6"] = list(asns_temp)
+
+        asns_temp = set(list(asns["ipv4"]))
+        asns["ipv4"] = list(asns_temp)
+
+        if address_family == 6:
+            return asns["ipv6"]
+        elif address_family == 4:
+            return asns["ipv4"]
+        else:
+            return asns
 
     def get_peeringdb_contacts(self):
         return PeeringDB().get_autonomous_system_contacts(self.asn)
@@ -1912,8 +1951,19 @@ class Template(ChangeLoggedModel, TaggableModel):
 
             if not asn:
                 return []
-            autonmous_system = AutonomousSystem.objects.get(asn=asn)
-            return autonmous_system.get_irr_as_set_asns(address_family)
+
+            autonomous_system = AutonomousSystem.objects.get(asn=asn)
+            return autonomous_system.get_irr_as_set_asns(address_family)
+
+        def asn_collection_list(asn, ascollection, address_family=0):
+            """
+            Return the list of all ASNs for a collection of ASses including their AS-Sets
+            """
+            if not ascollection:
+                return []
+
+            autonomous_system = AutonomousSystem.objects.get(asn=asn)
+            return autonomous_system.get_irr_asset_collection_asns(ascollection, address_family)
 
         def cisco_password(password):
             from utils.crypto.cisco import MAGIC as CISCO_MAGIC
@@ -1924,6 +1974,9 @@ class Template(ChangeLoggedModel, TaggableModel):
 
         # Add custom filters to our environment
         environment.filters["prefix_list"] = prefix_list
+        environment.filters["prefix_list_bymemberasn"] = prefix_list_bymemberasn
+        environment.filters["asn_list"] = asn_list
+        environment.filters["asn_collection_list"] = asn_collection_list
         environment.filters["cisco_password"] = cisco_password
 
         # Try rendering the template, return a message about syntax issues if there
