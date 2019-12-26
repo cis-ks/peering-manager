@@ -49,6 +49,58 @@ def call_irr_as_set_resolver(irr_as_set, ip_version=6):
 
     return prefixes
 
+def call_irr_as_resolver(asn, ip_version=6):
+    """
+    Call a subprocess to get the prefixes for AS for the wanted IP version.
+    """
+    prefixes = []
+
+    if not asn:
+        return prefixes
+
+    if asn[:2] != "AS":
+        asstring = "AS{}".format(asn)
+    else:
+        asstring = asn
+
+    return call_irr_as_set_resolver(asn, ip_version)
+
+def call_irr_as_set_to_asn_resolver(irr_as_set, ip_version=6):
+    """
+    Call a subprocess to get all ASNs from an AS-SET for the wanted IP version.
+    """
+    asns = []
+    if not irr_as_set:
+        return asns
+
+    # Call bgpq3 with arguments to get a JSON result
+    command = [
+        settings.BGPQ3_PATH,
+        "-h",
+        settings.BGPQ3_HOST,
+        "-S",
+        settings.BGPQ3_SOURCES,
+        "-{}".format(ip_version),
+        "-j",
+        "-f",
+        "1"
+        "-l",
+        "asn_list",
+        irr_as_set,
+    ]
+
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate()
+
+    if process.returncode != 0:
+        error_log = "bgpq3 exit code is {}".format(process.returncode)
+        if err and err.strip():
+            error_log += ", stderr: {}".format(err)
+        raise ValueError(error_log)
+
+    asns = json.loads(out.decode())["asn_list"]
+
+    return asns
 
 def parse_irr_as_set(asn, irr_as_set):
     """

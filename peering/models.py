@@ -14,7 +14,7 @@ from django.utils.safestring import mark_safe
 
 from netfields import InetAddressField, NetManager
 
-from . import call_irr_as_set_resolver, parse_irr_as_set
+from . import call_irr_as_set_resolver, call_irr_as_resolver, call_irr_as_set_to_asn_resolver, parse_irr_as_set
 from .constants import *
 from .fields import ASNField, CommunityField, TTLField
 from netbox.api import NetBox
@@ -313,6 +313,44 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
             return prefixes["ipv4"]
         else:
             return prefixes
+    
+    def get_irr_as_prefixes(self, asn=self.asn, address_family=0):
+        """
+        Return a prefix list for the given asn only. If none is provided the list
+        will be empty.
+
+        If specified, only a list of the prefixes for the given address family will be
+        returned. 6 for IPv6, 4 for IPv4, both for all other values.
+        """
+        prefixes = {"ipv6": [], "ipv4": []}
+
+        prefixes["ipv6"].extend(call_irr_as_resolver(asn, ip_version=6))
+        prefixes["ipv4"].extend(call_irr_as_resolver(asn, ip_version=4))
+
+        if address_family == 6:
+            return prefixes["ipv6"]
+        elif address_family == 4:
+            return prefixes["ipv4"]
+        else:
+            return prefixes
+    
+    def get_irr_as_set_asns(self, address_family=0):
+        """
+        Return the ASN-List for the given AS-Set and the given Address-Family
+        """
+        as_sets = parse_irr_as_set(self.asn, self.irr_as_set)
+        asns = {"ipv6": [], "ipv4": []}
+
+        asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(irr_as_set=as_sets, ip_version=6))
+        asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(irr_as_set=as_sets, ip_version=4))
+
+        if address_family == 6:
+            return asns["ipv6"]
+        elif address_family == 4:
+            return asns["ipv4"]
+        else:
+            return asns
+
 
     def get_peeringdb_contacts(self):
         return PeeringDB().get_autonomous_system_contacts(self.asn)
@@ -1856,6 +1894,26 @@ class Template(ChangeLoggedModel, TaggableModel):
                 return []
             autonomous_system = AutonomousSystem.objects.get(asn=asn)
             return autonomous_system.get_irr_as_set_prefixes(address_family)
+
+        def prefix_list_bymemberasn(asn, memberasn, address_family=0):
+            """
+            Return the prefixes for the given AS. Not the AS-Set
+            """
+
+            if not asn:
+                return []
+            autonomous_system = AutonomousSystem.objects.get(asn=asn)
+            return autonomous_system.get_irr_as_prefixes(memberasn, address_family)
+
+        def asn_list(asn, address_family=0):
+            """
+            Return the list of ASNs for given AS.
+            """
+
+            if not asn:
+                return []
+            autonmous_system = AutonomousSystem.objects.get(asn=asn)
+            return autonmous_system.get_irr_as_set_asns(address_family)
 
         def cisco_password(password):
             from utils.crypto.cisco import MAGIC as CISCO_MAGIC
