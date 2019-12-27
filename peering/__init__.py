@@ -58,13 +58,12 @@ def call_irr_as_resolver(asn, ip_version=6):
     if not asn:
         return prefixes
 
-    if asn[:2] != "AS":
+    if str(asn)[:2] != "AS":
         asstring = "AS{}".format(asn)
     else:
         asstring = asn
 
     return call_irr_as_set_resolver(asstring, ip_version)
-
 
 def call_irr_as_set_to_asn_resolver(irr_as_set, ip_version=6):
     """
