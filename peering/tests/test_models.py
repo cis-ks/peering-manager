@@ -105,11 +105,26 @@ class AutonomousSystemTest(TestCase):
         self.assertEqual(asn, autonomous_system.asn)
         self.assertFalse(autonomous_system.synchronize_with_peeringdb())
 
-    def test_get_irr_as_set_prefixes(self):
+    def test_retrieve_irr_as_set_prefixes(self):
         with patch("peering.subprocess.Popen", side_effect=mocked_subprocess_popen):
-            prefixes = self.autonomous_system.get_irr_as_set_prefixes()
+            prefixes = self.autonomous_system.retrieve_irr_as_set_prefixes()
             self.assertEqual(1, len(prefixes["ipv6"]))
             self.assertEqual(1, len(prefixes["ipv4"]))
+
+    def test_get_irr_as_set_prefixes(self):
+        with patch("peering.subprocess.Popen", side_effect=mocked_subprocess_popen):
+            self.autonomous_system.prefixes = (
+                self.autonomous_system.retrieve_irr_as_set_prefixes()
+            )
+            self.assertEqual(1, len(self.autonomous_system.prefixes["ipv6"]))
+            self.assertEqual(1, len(self.autonomous_system.prefixes["ipv4"]))
+
+        prefixes = self.autonomous_system.get_irr_as_set_prefixes()
+        self.assertEqual(self.autonomous_system.prefixes["ipv6"], prefixes["ipv6"])
+        self.assertEqual(self.autonomous_system.prefixes["ipv4"], prefixes["ipv4"])
+
+    def test_get_peeringdb_network(self):
+        self.assertIsNone(self.autonomous_system.get_peeringdb_network())
 
     def test__str__(self):
         asn = 64500
@@ -442,6 +457,30 @@ class InternetExchangePeeringSessionTest(TestCase):
         router.platform = PLATFORM_JUNOS
         peering_session.encrypt_password(router.platform)
         self.assertIsNone(peering_session.encrypted_password)
+
+    def test_exists_in_peeringdb(self):
+        autonomous_system = AutonomousSystem.objects.create(asn=64500, name="Test")
+        internet_exchange = InternetExchange.objects.create(name="Test", slug="test")
+        InternetExchangePeeringSession.objects.create(
+            autonomous_system=autonomous_system,
+            internet_exchange=internet_exchange,
+            ip_address="2001:db8::1",
+        )
+        self.assertFalse(
+            InternetExchangePeeringSession.objects.get(
+                ip_address="2001:db8::1"
+            ).exists_in_peeringdb()
+        )
+
+    def test_is_abandoned(self):
+        autonomous_system = AutonomousSystem.objects.create(asn=64500, name="Test")
+        internet_exchange = InternetExchange.objects.create(name="Test", slug="test")
+        peering_session = InternetExchangePeeringSession.objects.create(
+            autonomous_system=autonomous_system,
+            internet_exchange=internet_exchange,
+            ip_address="2001:db8::1",
+        )
+        self.assertFalse(peering_session.is_abandoned())
 
 
 class RouterTest(TestCase):

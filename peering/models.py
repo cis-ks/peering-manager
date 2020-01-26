@@ -5,7 +5,7 @@ import napalm
 from jinja2 import Environment, TemplateSyntaxError
 
 from django.conf import settings
-from django.contrib.postgres.fields import ArrayField
+from django.contrib.postgres.fields import ArrayField, JSONField
 from django.db import models, transaction
 from django.db.models import Q
 from django.urls import reverse
@@ -19,7 +19,7 @@ from .constants import *
 from .fields import ASNField, CommunityField, TTLField
 from netbox.api import NetBox
 from peeringdb.http import PeeringDB
-from peeringdb.models import NetworkIXLAN, PeerRecord
+from peeringdb.models import Network, NetworkIXLAN, PeerRecord
 from utils.crypto.cisco import (
     encrypt as cisco_encrypt,
     decrypt as cisco_decrypt,
@@ -83,6 +83,7 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
     potential_internet_exchange_peering_sessions = ArrayField(
         InetAddressField(store_prefix_length=False), blank=True, default=list
     )
+    prefixes = JSONField(blank=True, null=True, editable=False)
 
     class Meta:
         ordering = ["asn"]
@@ -127,6 +128,12 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
 
     def get_absolute_url(self):
         return reverse("peering:autonomous_system_details", kwargs={"asn": self.asn})
+
+    def get_peeringdb_network(self):
+        try:
+            return Network.objects.get(asn=self.asn)
+        except Network.DoesNotExist:
+            return None
 
     def get_internet_exchange_peering_sessions_list_url(self):
         return reverse(
@@ -244,11 +251,13 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         ix_and_sessions = []
 
         for internet_exchange in self.get_common_internet_exchanges():
-            missing_sessions = []
+            missing_sessions = {"ipv6": [], "ipv4": []}
             for session in self.potential_internet_exchange_peering_sessions:
                 for prefix in internet_exchange.get_prefixes():
                     if session in ipaddress.ip_network(prefix):
-                        missing_sessions.append(session)
+                        missing_sessions["ipv{}".format(session.version)].append(
+                            session
+                        )
 
             ix_and_sessions.append(
                 {
@@ -291,6 +300,25 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
 
         return True
 
+    def retrieve_irr_as_set_prefixes(self):
+        """
+        Return a prefix list for this AS' IRR AS-SET. If none is provided the list
+        will be empty.
+
+        This function will actually retrieve prefixes from IRR online sources. It is
+        expected to be slow due to network operations and depending on the size of the
+        data to process.
+        """
+        as_sets = parse_irr_as_set(self.asn, self.irr_as_set)
+        prefixes = {"ipv6": [], "ipv4": []}
+
+        # For each AS-SET try getting IPv6 and IPv4 prefixes
+        for as_set in as_sets:
+            prefixes["ipv6"].extend(call_irr_as_set_resolver(as_set, address_family=6))
+            prefixes["ipv4"].extend(call_irr_as_set_resolver(as_set, address_family=4))
+
+        return prefixes
+
     def get_irr_as_set_prefixes(self, address_family=0):
         """
         Return a prefix list for this AS' IRR AS-SET. If none is provided the list
@@ -298,14 +326,12 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
 
         If specified, only a list of the prefixes for the given address family will be
         returned. 6 for IPv6, 4 for IPv4, both for all other values.
-        """
-        as_sets = parse_irr_as_set(self.asn, self.irr_as_set)
-        prefixes = {"ipv6": [], "ipv4": []}
 
-        # For each AS-SET try getting IPv6 and IPv4 prefixes
-        for as_set in as_sets:
-            prefixes["ipv6"].extend(call_irr_as_set_resolver(as_set, ip_version=6))
-            prefixes["ipv4"].extend(call_irr_as_set_resolver(as_set, ip_version=4))
+        The stored database value will be used if it exists.
+        """
+        prefixes = (
+            self.prefixes if self.prefixes else self.retrieve_irr_as_set_prefixes()
+        )
 
         if address_family == 6:
             return prefixes["ipv6"]
@@ -1192,6 +1218,44 @@ class InternetExchangePeeringSession(BGPSession):
         return reverse(
             "peering:internet_exchange_peering_session_details", kwargs={"pk": self.pk}
         )
+
+    def exists_in_peeringdb(self):
+        """
+        Returns True if a PeerRecord exists for this session's IP.
+        """
+        lookup = {
+            "network_ixlan__ipaddr{}".format(self.ip_address.version): str(
+                self.ip_address
+            )
+        }
+        try:
+            PeerRecord.objects.get(**lookup)
+            return True
+        except PeerRecord.DoesNotExist:
+            pass
+        return False
+
+    def is_abandoned(self):
+        """
+        Returns True if a session is considered as abandoned. Returns False otherwise.
+
+        A session is *not* considered as abandoned if one it matches one of the following
+        criteria:
+          * The Internet Exchange is not linked to a PeeringDB record
+          * User does not poll peering session states
+          * The peer AS has no cached PeeringDB record
+          * The peer AS has a cached PeeringDB record with the session IP address
+          * The BGP state for the session is not idle or active
+        """
+        if (
+            not self.internet_exchange.peeringdb_id
+            or not self.internet_exchange.check_bgp_session_states
+            or not self.autonomous_system.get_peeringdb_network()
+            or self.exists_in_peeringdb()
+            or self.bgp_state not in [BGP_STATE_IDLE, BGP_STATE_ACTIVE]
+        ):
+            return False
+        return True
 
     def __str__(self):
         return "{} - AS{} - IP {}".format(

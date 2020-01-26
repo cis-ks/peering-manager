@@ -6,19 +6,25 @@
 
 
 import os
+import platform
 import socket
 
 from django.contrib.messages import constants as messages
 from django.core.exceptions import ImproperlyConfigured
 
-try:
-    from peering_manager import configuration
-except ImportError:
-    raise ImproperlyConfigured(
-        "Configuration file is not present. Please define peering_manager/configuration.py per the documentation."
-    )
+
+HOSTNAME = platform.node()
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 VERSION = "v1.1.1-dev"
+
+if platform.python_version_tuple() < ("3", "6"):
+    raise RuntimeError(
+        "Peering Manager requires Python 3.6 or higher (current: Python {})".format(
+            platform.python_version()
+        )
+    )
+
 DEFAULT_LOGGING = {
     "version": 1,
     "formatters": {
@@ -69,6 +75,13 @@ DEFAULT_LOGGING = {
         "peering.manager.netbox": {"handlers": ["netbox_file"], "level": "DEBUG"},
     },
 }
+
+try:
+    from peering_manager import configuration
+except ImportError:
+    raise ImproperlyConfigured(
+        "Configuration file is not present. Please define peering_manager/configuration.py per the documentation."
+    )
 
 DATABASE = SECRET_KEY = ALLOWED_HOSTS = MY_ASN = None
 for setting in ["DATABASE", "SECRET_KEY", "ALLOWED_HOSTS", "MY_ASN"]:
@@ -153,9 +166,6 @@ PEERINGDB = "https://peeringdb.com/asn/"
 PEERINGDB_USERNAME = getattr(configuration, "PEERINGDB_USERNAME", "")
 PEERINGDB_PASSWORD = getattr(configuration, "PEERINGDB_PASSWORD", "")
 
-# Build paths inside the project like this: os.path.join(BASE_DIR, ...)
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
 
 try:
     from peering_manager.ldap_config import *
@@ -206,7 +216,6 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
-    "debug_toolbar",
     "django_filters",
     "django_tables2",
     "rest_framework",
@@ -220,7 +229,6 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    "debug_toolbar.middleware.DebugToolbarMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -233,6 +241,11 @@ MIDDLEWARE = [
     "utils.middleware.ObjectChangeMiddleware",
     "utils.middleware.RequireLoginMiddleware",
 ]
+
+if DEBUG:
+    # Enable debug toolbar only in debugging mode
+    INSTALLED_APPS.append("debug_toolbar")
+    MIDDLEWARE = ["debug_toolbar.middleware.DebugToolbarMiddleware"] + MIDDLEWARE
 
 ROOT_URLCONF = "peering_manager.urls"
 
@@ -290,8 +303,3 @@ STATICFILES_DIRS = (os.path.join(BASE_DIR, "project-static"),)
 
 # Django debug toolbar
 INTERNAL_IPS = ["127.0.0.1", "::1"]
-
-try:
-    HOSTNAME = socket.gethostname()
-except Exception:
-    HOSTNAME = "localhost"
