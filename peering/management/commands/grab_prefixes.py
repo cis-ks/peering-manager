@@ -14,6 +14,6 @@ class Command(BaseCommand):
 
         for autonomous_system in AutonomousSystem.objects.all():
             autonomous_system.prefixes = (
-                autonomous_system.retrieve_irr_as_set_prefixes()
+                autonomous_system.retrieve_irr_data()
             )
             autonomous_system.save()

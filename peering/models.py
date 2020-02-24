@@ -14,7 +14,7 @@ from django.utils.safestring import mark_safe
 
 from netfields import InetAddressField, NetManager
 
-from . import call_irr_as_set_resolver, parse_irr_as_set
+from . import call_irr_as_set_resolver, call_irr_as_set_to_asn_resolver, call_irr_as_resolver, parse_irr_as_set
 from .constants import *
 from .fields import ASNField, CommunityField, TTLField
 from netbox.api import NetBox
@@ -300,6 +300,26 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
 
         return True
 
+    def retrieve_irr_data(self):
+        irrdata = {
+            "prefixes": {},
+            "asns" : {},
+            "asnprefixes": {}
+        }
+        irrdata["prefixes"] = self.retrieve_irr_as_set_prefixes()
+        irrdata["asns"] = self.retrieve_irr_as_set_asns()
+
+        for asn in irrdata["asns"]["ipv4"]:
+            irrdata["asnprefixes"][asn] = {}
+            irrdata["asnprefixes"][asn]["ipv4"] = self.retrieve_irr_as_prefixes(asn, address_family=4)
+
+        for asn in irrdata["asns"]["ipv6"]:
+            if asn not in irrdata["asnprefixes"]:
+                irrdata["asnprefixes"][asn] = {}
+            irrdata["asnprefixes"][asn]["ipv6"] = self.retrieve_irr_as_prefixes(asn, address_family=6)
+
+        return irrdata
+
     def retrieve_irr_as_set_prefixes(self):
         """
         Return a prefix list for this AS' IRR AS-SET. If none is provided the list
@@ -330,7 +350,7 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         The stored database value will be used if it exists.
         """
         prefixes = (
-            self.prefixes if self.prefixes else self.retrieve_irr_as_set_prefixes()
+            self.prefixes["prefixes"] if self.prefixes and "prefixes" in self.prefixes else self.retrieve_irr_as_set_prefixes()
         )
 
         if address_family == 6:
@@ -339,6 +359,115 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
             return prefixes["ipv4"]
         else:
             return prefixes
+
+    def retrieve_irr_as_prefixes(self, asn, address_family=0):
+        """
+        Return a prefix list for the given asn only. If none is provided the list
+        will be empty.
+
+        If specified, only a list of the prefixes for the given address family will be
+        returned. 6 for IPv6, 4 for IPv4, both for all other values.
+        """
+        prefixes = {"ipv6": [], "ipv4": []}
+
+        if not asn:
+            asn=self.asn
+
+        if address_family == 6:
+            prefixes["ipv6"].extend(call_irr_as_resolver(asn, address_family=6))
+            return prefixes["ipv6"]
+
+        elif address_family == 4:
+            prefixes["ipv4"].extend(call_irr_as_resolver(asn, address_family=4))
+            return prefixes["ipv4"]
+
+        else:
+            prefixes["ipv6"].extend(call_irr_as_resolver(asn, address_family=6))
+            prefixes["ipv4"].extend(call_irr_as_resolver(asn, address_family=4))
+            return prefixes
+    
+    def get_irr_as_prefixes(self, asn, address_family=0):
+        """
+        Return a prefix list for the given asn only. If none is provided the list
+        will be empty.
+
+        If specified, only a list of the prefixes for the given address family will be
+        returned. 6 for IPv6, 4 for IPv4, both for all other values.
+
+        The stored database value will be used if it exists.
+        """
+        if not asn:
+            asn=self.asn
+
+        prefixes = (
+            self.prefixes["asnprefixes"][asn] if self.prefixes and "asnprefixes" in self.prefixes and asn in self.prefixes["asnprefixes"] else self.retrieve_irr_as_prefixes(asn, address_family)
+        )
+
+        return prefixes
+
+    def retrieve_irr_as_set_asns(self):
+        """
+        Return the ASN-List for the given AS-Set and the given Address-Family
+        """
+        as_sets = parse_irr_as_set(self.asn, self.irr_as_set)
+        asns = {"ipv6": [], "ipv4": []}
+
+        for as_set in as_sets:
+            asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(as_set, address_family=6))
+            asns["ipv4"].extend(call_irr_as_set_to_asn_resolver(as_set, address_family=4))
+
+        return asns
+
+    def get_irr_as_set_asns(self, address_family=0):
+        """
+        Return the ASN-List for the given AS-Set and the given Address-Family
+
+        The stored database value will be used if it exists.
+        """
+        asns = (
+            self.prefixes["asns"] if self.prefixes and "asns" in self.prefixes else self.retrieve_irr_as_set_asns()
+        )
+
+        if address_family == 6:
+            return asns["ipv6"]
+        elif address_family == 4:
+            return asns["ipv4"]
+        else:
+            return asns
+
+    def get_irr_asset_collection_asns(self, ascollection, address_family=0):
+        """
+        Return an ASN-List for a Collection of ASses and their AS-Sets
+
+        Data will not saved into database. For Jinja2-Usage it is necessary
+        to check in which as the asn is available to use from database
+        """
+        as_sets = []
+        asns = {"ipv6": [], "ipv4": []}
+
+        for autonomous_system in list(ascollection):
+            as_sets.extend(parse_irr_as_set(autonomous_system["asn"], autonomous_system["irr_as_set"]))
+
+        # Unifiying the AS-SET-list
+        as_sets.sort()
+        as_temp = set(as_sets)
+        as_sets = list(as_temp)
+
+        for as_set in as_sets:
+            asns["ipv6"].extend(call_irr_as_set_to_asn_resolver(as_set, address_family=6))
+            asns["ipv4"].extend(call_irr_as_set_to_asn_resolver(as_set, address_family=4))
+        
+        # # Sorting and unifiying the ASN-Lists
+        asns["ipv6"].sort()
+        asns["ipv4"].sort()
+
+        asns_temp = set(list(asns["ipv6"]))
+        asns["ipv6"] = list(asns_temp)
+
+        asns_temp = set(list(asns["ipv4"]))
+        asns["ipv4"] = list(asns_temp)
+
+        return asns
 
     def get_peeringdb_contacts(self):
         return PeeringDB().get_autonomous_system_contacts(self.asn)
@@ -1921,6 +2050,37 @@ class Template(ChangeLoggedModel, TaggableModel):
             autonomous_system = AutonomousSystem.objects.get(asn=asn)
             return autonomous_system.get_irr_as_set_prefixes(address_family)
 
+        def prefix_list_bymemberasn(asn, memberasn, address_family=0):
+            """
+            Return the prefixes for the given AS. Not the AS-Set
+            """
+
+            if not asn:
+                return []
+            autonomous_system = AutonomousSystem.objects.get(asn=asn)
+            return autonomous_system.get_irr_as_prefixes(memberasn, address_family)
+
+        def asn_list(asn, address_family=0):
+            """
+            Return the list of ASNs for given AS.
+            """
+
+            if not asn:
+                return []
+
+            autonomous_system = AutonomousSystem.objects.get(asn=asn)
+            return autonomous_system.get_irr_as_set_asns(address_family)
+
+        def asn_collection_list(asn, ascollection, address_family=0):
+            """
+            Return the list of all ASNs for a collection of ASses including their AS-Sets
+            """
+            if not ascollection:
+                return []
+
+            autonomous_system = AutonomousSystem.objects.get(asn=asn)
+            return autonomous_system.get_irr_asset_collection_asns(ascollection, address_family)
+
         def cisco_password(password):
             from utils.crypto.cisco import MAGIC as CISCO_MAGIC
 
@@ -1930,6 +2090,9 @@ class Template(ChangeLoggedModel, TaggableModel):
 
         # Add custom filters to our environment
         environment.filters["prefix_list"] = prefix_list
+        environment.filters["prefix_list_bymemberasn"] = prefix_list_bymemberasn
+        environment.filters["asn_list"] = asn_list
+        environment.filters["asn_collection_list"] = asn_collection_list
         environment.filters["cisco_password"] = cisco_password
 
         # Try rendering the template, return a message about syntax issues if there
