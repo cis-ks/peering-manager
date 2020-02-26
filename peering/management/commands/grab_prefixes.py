@@ -13,7 +13,5 @@ class Command(BaseCommand):
         self.logger.info("Getting prefixes for AS with IRR AS-SETs")
 
         for autonomous_system in AutonomousSystem.objects.all():
-            autonomous_system.prefixes = (
-                autonomous_system.retrieve_irr_data()
-            )
+            autonomous_system.prefixes = autonomous_system.retrieve_irr_data()
             autonomous_system.save()

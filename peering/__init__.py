@@ -28,16 +28,22 @@ def call_irr_resolver(cmd, object, address_family=6):
     ]
 
     # Add options depending on given cmd
-    if cmd == 'as_set_prefixes' :
-        command.extend([ "-{}".format(address_family), "-A", ])
-    elif cmd == 'as_set_to_asn' :
-        command.extend([ "-f", "1", ])
+    if cmd == "as_set_prefixes":
+        command.extend(
+            ["-{}".format(address_family), "-A",]
+        )
+    elif cmd == "as_set_to_asn":
+        command.extend(
+            ["-f", "1",]
+        )
     else:
         return resolvedobject
 
-    command.extend([ "-j", "-l", "object_list", object, ])
+    command.extend(
+        ["-j", "-l", "object_list", object,]
+    )
 
-    if cmd in [ 'as_set_prefixes' ]:
+    if cmd in ["as_set_prefixes"]:
         # Merge user settings to command line right before the name of the prefix list
         if settings.BGPQ3_ARGS:
             index = len(command) - 3
@@ -58,11 +64,13 @@ def call_irr_resolver(cmd, object, address_family=6):
 
     return resolvedobject
 
+
 def call_irr_as_set_resolver(irr_as_set, address_family=6):
     """
     Call a subprocess to expand the given AS-SET for the wanted IP version.
     """
-    return call_irr_resolver('as_set_prefixes', irr_as_set, address_family)
+    return call_irr_resolver("as_set_prefixes", irr_as_set, address_family)
+
 
 def call_irr_as_resolver(asn, address_family=6):
     """
@@ -70,14 +78,15 @@ def call_irr_as_resolver(asn, address_family=6):
     """
     if not asn:
         return []
-    
+
     # Format the AS-Number to AS<number> for retrieving Prefixes
     if str(asn)[:2] != "AS":
         asstring = "AS{}".format(asn)
     else:
         asstring = asn
 
-    return call_irr_resolver('as_set_prefixes', asstring, address_family)
+    return call_irr_resolver("as_set_prefixes", asstring, address_family)
+
 
 def call_irr_as_set_to_asn_resolver(irr_as_set, address_family=6):
     """
@@ -86,8 +95,7 @@ def call_irr_as_set_to_asn_resolver(irr_as_set, address_family=6):
     if not irr_as_set:
         return []
 
-    return call_irr_resolver('as_set_to_asn', irr_as_set, address_family)
-
+    return call_irr_resolver("as_set_to_asn", irr_as_set, address_family)
 
 
 def parse_irr_as_set(asn, irr_as_set):
