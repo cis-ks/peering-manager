@@ -7,7 +7,7 @@ from .constants import *
 from .models import ObjectChange, Tag
 
 
-class ObjectChangeFilter(django_filters.FilterSet):
+class ObjectChangeFilterSet(django_filters.FilterSet):
     q = django_filters.CharFilter(method="search", label="Search")
     time = django_filters.DateTimeFromToRangeFilter()
     action = django_filters.MultipleChoiceFilter(
@@ -32,7 +32,23 @@ class ObjectChangeFilter(django_filters.FilterSet):
         )
 
 
-class TagFilter(django_filters.FilterSet):
+class TagFilter(django_filters.ModelMultipleChoiceFilter):
+    """
+    Matches on one or more assigned tags.
+    If multiple tags are specified (like ?tag=one&tag=two), the queryset is filtered to
+    objects matching all tags.
+    """
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("field_name", "tags__slug")
+        kwargs.setdefault("to_field_name", "slug")
+        kwargs.setdefault("conjoined", True)
+        kwargs.setdefault("queryset", Tag.objects.all())
+
+        super().__init__(*args, **kwargs)
+
+
+class TagFilterSet(django_filters.FilterSet):
     q = django_filters.CharFilter(method="search", label="Search")
 
     class Meta:

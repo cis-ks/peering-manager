@@ -2,28 +2,25 @@
 {% load helpers %}
 {% block actions %}
 {% if perms.peering.change_directpeeringsession %}
-{% if peering_session.enabled %}
-<a href="{% url 'peering:direct_peering_session_disable' pk=peering_session.pk %}" class="btn btn-danger">
+<button type="button" class="btn btn-danger{% if not peering_session.enabled %} d-none{% endif %}" id="id_session_disable">
   <i class="fas fa-toggle-off"></i> Disable
-</a>
-{% else %}
-<a href="{% url 'peering:direct_peering_session_enable' pk=peering_session.pk %}" class="btn btn-success">
+</button>
+<button type="button" class="btn btn-success{% if peering_session.enabled %} d-none{% endif %}" id="id_session_enable">
   <i class="fas fa-toggle-on"></i> Enable
-</a>
-{% endif %}
-<a href="{% url 'peering:direct_peering_session_edit' pk=peering_session.pk %}" class="btn btn-warning">
+</button>
+<a href="{% url 'peering:directpeeringsession_edit' pk=peering_session.pk %}" class="btn btn-warning">
   <i class="fas fa-edit"></i> Edit
 </a>
 {% endif %}
 {% if perms.peering.delete_directpeeringsession %}
-<a href="{% url 'peering:direct_peering_session_delete' pk=peering_session.pk %}" class="btn btn-danger">
+<a href="{% url 'peering:directpeeringsession_delete' pk=peering_session.pk %}" class="btn btn-danger">
   <i class="fas fa-trash"></i> Delete
 </a>
 {% endif %}
 {% endblock %}
 {% block breadcrumb %}
-<li class="breadcrumb-item"><a href="{% url 'peering:autonomous_system_details' asn=peering_session.autonomous_system.asn %}">{{ peering_session.autonomous_system }}</a></li>
-<li class="breadcrumb-item"><a href="{% url 'peering:autonomous_system_direct_peering_sessions' asn=peering_session.autonomous_system.asn %}">Direct Peering Sessions</a></li>
+<li class="breadcrumb-item"><a href="{% url 'peering:autonomoussystem_details' asn=peering_session.autonomous_system.asn %}">{{ peering_session.autonomous_system }}</a></li>
+<li class="breadcrumb-item"><a href="{% url 'peering:autonomoussystem_direct_peering_sessions' asn=peering_session.autonomous_system.asn %}">Direct Peering Sessions</a></li>
 <li class="breadcrumb-item active" aria-current="page">{% block title %}{{ peering_session }}{% endblock %}</li>
 {% endblock %}
 {% block content %}
@@ -96,6 +93,12 @@
                 <td>{{ peering_session.multihop_ttl }}</td>
               </tr>
               {% endif %}
+              {% if peering_session.router %}
+              <tr>
+                <td>Router</td>
+                <td>{{ peering_session.router|as_link }}</td>
+              </tr>
+              {% endif %}
             </table>
           </div>
           <div class="card">
@@ -110,7 +113,7 @@
               {% endif %}
             </div>
           </div>
-          {% include 'utils/includes/tags_card.html' with tags=peering_session.tags.all url='peering:direct_peering_session_list' %}
+          {% include 'utils/includes/tags_card.html' with tags=peering_session.tags.all url='peering:directpeeringsession_list' %}
         </div>
         <div class="col-md-6">
           <div class="card">
@@ -138,4 +141,36 @@
           </div>
         </div>
       </div>
+{% endblock %}
+{% block javascript %}
+    <script>
+      $("#id_session_disable").click(function() {
+        $.ajax({
+          method: "patch",
+          url: "{% url 'peering-api:directpeeringsession-detail' pk=peering_session.pk %}",
+          headers: { "X-CSRFTOKEN": "{{ csrf_token }}" },
+          data: {
+            "id": {{ peering_session.pk }},
+            "enabled": false,
+            "bgp_state": "idle",
+            "received_prefix_count": 0,
+            "advertised_prefix_count": 0
+          }
+        }).done(function() {
+          $("#id_session_enable").removeClass("d-none");
+          $("#id_session_disable").addClass("d-none");
+        });
+      });
+      $("#id_session_enable").click(function() {
+        $.ajax({
+          method: "patch",
+          url: "{% url 'peering-api:directpeeringsession-detail' pk=peering_session.pk %}",
+          headers: { "X-CSRFTOKEN": "{{ csrf_token }}" },
+          data: { "id": {{ peering_session.pk }}, "enabled": true }
+        }).done(function() {
+          $("#id_session_enable").addClass("d-none");
+          $("#id_session_disable").removeClass("d-none");
+        });
+      });
+    </script>
 {% endblock %}

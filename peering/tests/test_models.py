@@ -35,7 +35,7 @@ from utils.crypto.junos import (
     decrypt as junos_decrypt,
     is_encrypted as junos_is_encrypted,
 )
-from utils.testing import MockedResponse
+from utils.testing import json_file_to_python_type, MockedResponse
 
 
 def mocked_peeringdb(*args, **kwargs):
@@ -46,26 +46,11 @@ def mocked_peeringdb(*args, **kwargs):
 
 
 class AutonomousSystemTest(TestCase):
-    def setUp(self):
-        super().setUp()
-
-        self.autonomous_system = AutonomousSystem.objects.create(
+    @classmethod
+    def setUpTestData(cls):
+        cls.autonomous_system = AutonomousSystem.objects.create(
             asn=65537, name="Test", irr_as_set="AS-MOCKED"
         )
-
-    def test_does_exist(self):
-        asn = 201281
-
-        # AS should not exist
-        autonomous_system = AutonomousSystem.does_exist(asn)
-        self.assertEqual(None, autonomous_system)
-
-        # Create the AS
-        new_as = AutonomousSystem.objects.create(asn=asn, name="Guillaume Mazoyer")
-
-        # AS must exist
-        autonomous_system = AutonomousSystem.does_exist(asn)
-        self.assertEqual(asn, new_as.asn)
 
     @patch("peeringdb.http.requests.get", side_effect=mocked_peeringdb)
     def test_create_from_peeringdb(self, *_):
@@ -74,39 +59,55 @@ class AutonomousSystemTest(TestCase):
         # Illegal ASN
         self.assertIsNone(AutonomousSystem.create_from_peeringdb(64500))
 
-        # Must not exist at first
-        self.assertIsNone(AutonomousSystem.does_exist(asn))
-
         # Create the AS
-        autonomous_system1 = AutonomousSystem.create_from_peeringdb(asn)
-        self.assertEqual(asn, autonomous_system1.asn)
+        a_s = AutonomousSystem.create_from_peeringdb(asn)
+        self.assertIsNotNone(a_s)
+        self.assertEqual(asn, a_s.asn)
 
-        # Must exist now
-        self.assertEqual(asn, AutonomousSystem.does_exist(asn).asn)
+        exists = True
+        try:
+            AutonomousSystem.objects.get(asn=asn)
+        except AutonomousSystem.DoesNotExist:
+            exists = False
+        self.assertTrue(exists)
 
-        # Must not rise error, just return the AS
-        autonomous_system2 = AutonomousSystem.create_from_peeringdb(asn)
-        self.assertEqual(asn, autonomous_system2.asn)
+        # Trying to re-create the AS should just return it
+        a_s = AutonomousSystem.create_from_peeringdb(asn)
+        self.assertIsNotNone(a_s)
+        self.assertEqual(asn, a_s.asn)
 
-        # Must exist now also
-        self.assertEqual(asn, AutonomousSystem.does_exist(asn).asn)
+        exists = True
+        try:
+            AutonomousSystem.objects.get(asn=asn)
+        except (
+            AutonomousSystem.DoesNotExist,
+            AutonomousSystem.MultipleObjectsReturned,
+        ):
+            exists = False
+        self.assertTrue(exists)
 
     @patch("peeringdb.http.requests.get", side_effect=mocked_peeringdb)
     def test_synchronize_with_peeringdb(self, *_):
         # Create legal AS to sync with PeeringDB
         asn = 65536
-        autonomous_system = AutonomousSystem.create_from_peeringdb(asn)
-        self.assertEqual(asn, autonomous_system.asn)
-        self.assertTrue(autonomous_system.synchronize_with_peeringdb())
+        a_s = AutonomousSystem.create_from_peeringdb(asn)
+        self.assertEqual(asn, a_s.asn)
+        self.assertTrue(a_s.synchronize_with_peeringdb())
 
         # Create illegal AS to fail sync with PeeringDB
         asn = 64500
-        autonomous_system = AutonomousSystem.objects.create(asn=asn, name="Test")
-        self.assertEqual(asn, autonomous_system.asn)
-        self.assertFalse(autonomous_system.synchronize_with_peeringdb())
+        a_s = AutonomousSystem.objects.create(asn=asn, name="Test")
+        self.assertEqual(asn, a_s.asn)
+        self.assertFalse(a_s.synchronize_with_peeringdb())
 
     def test_retrieve_irr_as_set_prefixes(self):
         with patch("peering.subprocess.Popen", side_effect=mocked_subprocess_popen):
+            prefixes = self.autonomous_system.retrieve_irr_as_set_prefixes()
+            self.assertEqual(1, len(prefixes["ipv6"]))
+            self.assertEqual(1, len(prefixes["ipv4"]))
+
+        with patch("peering.subprocess.Popen", side_effect=mocked_subprocess_popen):
+            self.autonomous_system.irr_as_set = "AS-ERROR"
             prefixes = self.autonomous_system.retrieve_irr_as_set_prefixes()
             self.assertEqual(1, len(prefixes["ipv6"]))
             self.assertEqual(1, len(prefixes["ipv4"]))
@@ -127,41 +128,21 @@ class AutonomousSystemTest(TestCase):
         self.assertIsNone(self.autonomous_system.get_peeringdb_network())
 
     def test__str__(self):
-        asn = 64500
-        name = "Test"
-        expected = "AS{} - {}".format(asn, name)
-        autonomous_system = AutonomousSystem.objects.create(asn=asn, name=name)
-
-        self.assertEqual(expected, str(autonomous_system))
+        self.assertEqual(
+            f"AS{self.autonomous_system.asn} - {self.autonomous_system.name}",
+            str(self.autonomous_system),
+        )
 
 
 class CommunityTest(TestCase):
-    def test_create(self):
-        community_list = [
-            {"name": "Test", "value": "64500:1", "type": None, "str": "Test"},
-            {
-                "name": "Test",
-                "value": "64500:1",
-                "type": COMMUNITY_TYPE_EGRESS,
-                "str": "Test",
-            },
+    @classmethod
+    def setUpTestData(cls):
+        cls.communities = [
+            Community(name="test-1", value="64500:1", type=COMMUNITY_TYPE_EGRESS),
+            Community(name="test-2", value="64500:2", type=COMMUNITY_TYPE_INGRESS),
+            Community(name="test-3", value="64500:3", type="unknown"),
         ]
-
-        for details in community_list:
-            if details["type"]:
-                community = Community.objects.create(
-                    name=details["name"], value=details["value"], type=details["type"]
-                )
-            else:
-                community = Community.objects.create(
-                    name=details["name"], value=details["value"]
-                )
-
-            self.assertIsNotNone(community)
-            self.assertEqual(details["name"], community.name)
-            self.assertEqual(details["value"], community.value)
-            self.assertEqual(details["type"] or COMMUNITY_TYPE_INGRESS, community.type)
-            self.assertEqual(details["str"], str(community))
+        Community.objects.bulk_create(cls.communities)
 
     def test_get_type_html(self):
         expected = [
@@ -169,79 +150,107 @@ class CommunityTest(TestCase):
             '<span class="badge badge-info">Ingress</span>',
             '<span class="badge badge-secondary">Unknown</span>',
         ]
-        community_types = [COMMUNITY_TYPE_EGRESS, COMMUNITY_TYPE_INGRESS, "unknown"]
 
-        for i in range(len(community_types)):
-            self.assertEqual(
-                expected[i],
-                Community.objects.create(
-                    name="test{}".format(i),
-                    value="64500:{}".format(i),
-                    type=community_types[i],
-                ).get_type_html(),
-            )
+        for i in range(len(expected)):
+            self.assertEqual(expected[i], self.communities[i].get_type_html())
 
 
 class DirectPeeringSessionTest(TestCase):
-    def test_encrypt_password(self):
-        autonomous_system = AutonomousSystem.objects.create(asn=64500, name="Test")
-        router = Router.objects.create(
+    @classmethod
+    def setUpTestData(cls):
+        cls.autonomous_system = AutonomousSystem.objects.create(asn=64500, name="Test")
+        cls.group = BGPGroup.objects.create(
+            name="Test Group", slug="testgroup", check_bgp_session_states=True
+        )
+        cls.router = Router.objects.create(
             name="Test", hostname="test.example.com", platform=PLATFORM_JUNOS
         )
-        peering_session = DirectPeeringSession.objects.create(
-            autonomous_system=autonomous_system,
+        cls.session = DirectPeeringSession.objects.create(
+            autonomous_system=cls.autonomous_system,
+            bgp_group=cls.group,
             ip_address="2001:db8::1",
             password="mypassword",
-            router=router,
+            router=cls.router,
         )
-        self.assertIsNotNone(peering_session.password)
-        self.assertIsNone(peering_session.encrypted_password)
+
+    def test_encrypt_password(self):
+        self.assertIsNotNone(self.session.password)
+        self.assertIsNone(self.session.encrypted_password)
 
         # Encrypt the password
-        peering_session.encrypt_password(router.platform)
-        self.assertIsNotNone(peering_session.encrypted_password)
-        self.assertTrue(junos_is_encrypted(peering_session.encrypted_password))
+        self.session.encrypt_password(self.router.platform)
+        self.assertIsNotNone(self.session.encrypted_password)
+        self.assertTrue(junos_is_encrypted(self.session.encrypted_password))
         self.assertEqual(
-            peering_session.password, junos_decrypt(peering_session.encrypted_password)
+            self.session.password, junos_decrypt(self.session.encrypted_password)
         )
 
         # Change router platform and re-encrypt
-        router.platform = PLATFORM_IOSXR
-        peering_session.encrypt_password(router.platform)
-        self.assertIsNotNone(peering_session.encrypted_password)
-        self.assertTrue(cisco_is_encrypted(peering_session.encrypted_password))
+        self.router.platform = PLATFORM_IOSXR
+        self.session.encrypt_password(self.router.platform)
+        self.assertIsNotNone(self.session.encrypted_password)
+        self.assertTrue(cisco_is_encrypted(self.session.encrypted_password))
         self.assertEqual(
-            peering_session.password, cisco_decrypt(peering_session.encrypted_password)
+            self.session.password, cisco_decrypt(self.session.encrypted_password)
         )
 
         # Change router platform to an unsupported one
-        router.platform = PLATFORM_NONE
-        peering_session.encrypt_password(router.platform)
-        self.assertIsNone(peering_session.encrypted_password)
+        self.router.platform = PLATFORM_NONE
+        self.session.encrypt_password(self.router.platform)
+        self.assertIsNone(self.session.encrypted_password)
 
-        # Change password to None and
-        peering_session.password = None
-        router.platform = PLATFORM_JUNOS
-        peering_session.encrypt_password(router.platform)
-        self.assertIsNone(peering_session.encrypted_password)
+        # Change password to None
+        self.session.password = None
+        self.router.platform = PLATFORM_JUNOS
+        self.session.encrypt_password(self.router.platform)
+        self.assertIsNone(self.session.encrypted_password)
+
+        # Change the password to a new one and make sure it changes the encrypted one
+        self.session.password = "mypassword1"
+        self.session.encrypt_password(self.router.platform)
+        self.assertEqual(
+            self.session.password, junos_decrypt(self.session.encrypted_password)
+        )
+        self.session.password = "mypassword2"
+        self.session.encrypt_password(self.router.platform)
+        self.assertEqual(
+            self.session.password, junos_decrypt(self.session.encrypted_password)
+        )
+
+    def test_poll(self):
+        with patch(
+            "peering.models.Router.get_bgp_neighbors_detail",
+            return_value=self.router.find_bgp_neighbor_detail(
+                json_file_to_python_type(
+                    "peering/tests/fixtures/get_bgp_neighbors_detail.json"
+                ),
+                "2001:db8::1",
+            ),
+        ):
+            self.assertTrue(self.session.poll())
+            self.assertEqual(567_257, self.session.received_prefix_count)
 
 
 class InternetExchangeTest(TestCase):
-    def test_is_peeringdb_valid(self):
-        ix = InternetExchange.objects.create(name="Test", slug="test")
+    @classmethod
+    def setUpTestData(cls):
+        cls.internet_exchange = InternetExchange.objects.create(
+            name="Test", slug="test"
+        )
 
+    def test_is_peeringdb_valid(self):
         # Not linked with PeeringDB but considered as valid
-        self.assertTrue(ix.is_peeringdb_valid())
+        self.assertTrue(self.internet_exchange.is_peeringdb_valid())
 
         # Set invalid ID, must result in false
-        ix.peeringdb_id = 14658
-        ix.save()
-        self.assertFalse(ix.is_peeringdb_valid())
+        self.internet_exchange.peeringdb_id = 14658
+        self.internet_exchange.save()
+        self.assertFalse(self.internet_exchange.is_peeringdb_valid())
 
         # Set valid ID, must result in true
-        ix.peeringdb_id = 29146
-        ix.save()
-        self.assertTrue(ix.is_peeringdb_valid())
+        self.internet_exchange.peeringdb_id = 29146
+        self.internet_exchange.save()
+        self.assertTrue(self.internet_exchange.is_peeringdb_valid())
 
     def test_get_peeringdb_id(self):
         # Expected results
@@ -319,98 +328,24 @@ class InternetExchangeTest(TestCase):
 
 
 class InternetExchangePeeringSessionTest(TestCase):
-    def test_does_exist(self):
-        # No session, must expect None
-        self.assertIsNone(InternetExchangePeeringSession.does_exist())
-
-        # Prepare objects and create a peering session
-        autonomous_system0 = AutonomousSystem.objects.create(asn=64500, name="Test")
-        internet_exchange0 = InternetExchange.objects.create(name="Test0", slug="test0")
-        peering_session0 = InternetExchangePeeringSession.objects.create(
-            autonomous_system=autonomous_system0,
-            internet_exchange=internet_exchange0,
+    @classmethod
+    def setUpTestData(cls):
+        cls.autonomous_system = AutonomousSystem.objects.create(asn=64510, name="Test")
+        cls.router = Router.objects.create(
+            name="Test", hostname="test.example.com", platform=PLATFORM_JUNOS
+        )
+        cls.exchange = InternetExchange.objects.create(
+            name="Test Group",
+            slug="testgroup",
+            ipv6_address="2001:db8::1337",
+            ipv4_address="192.0.2.64",
+            router=cls.router,
+            check_bgp_session_states=True,
+        )
+        cls.session = InternetExchangePeeringSession.objects.create(
+            autonomous_system=cls.autonomous_system,
+            internet_exchange=cls.exchange,
             ip_address="2001:db8::1",
-        )
-
-        # Make sure that the session has been created
-        self.assertIsNotNone(peering_session0)
-        # Make sure that the session is returned by calling does_exist()
-        # without arguments (only one session in the database)
-        self.assertIsNotNone(InternetExchangePeeringSession.does_exist())
-        # Make sure we can retrieve the session with its IP
-        self.assertEqual(
-            peering_session0,
-            InternetExchangePeeringSession.does_exist(ip_address="2001:db8::1"),
-        )
-        # Make sure we can retrieve the session with its IX
-        self.assertEqual(
-            peering_session0,
-            InternetExchangePeeringSession.does_exist(
-                internet_exchange=internet_exchange0
-            ),
-        )
-        # Make sure we can retrieve the session with AS
-        self.assertEqual(
-            peering_session0,
-            InternetExchangePeeringSession.does_exist(
-                autonomous_system=autonomous_system0
-            ),
-        )
-
-        # Create another peering session
-        peering_session1 = InternetExchangePeeringSession.objects.create(
-            autonomous_system=autonomous_system0,
-            internet_exchange=internet_exchange0,
-            ip_address="198.51.100.1",
-        )
-
-        # Make sure that the session has been created
-        self.assertIsNotNone(peering_session1)
-        # More than one session, must expect None
-        self.assertIsNone(InternetExchangePeeringSession.does_exist())
-        # Make sure we can retrieve the session with its IP
-        self.assertEqual(
-            peering_session1,
-            InternetExchangePeeringSession.does_exist(ip_address="198.51.100.1"),
-        )
-        # Make sure it returns None when using a field that the two sessions
-        # have in common
-        self.assertIsNone(
-            InternetExchangePeeringSession.does_exist(
-                internet_exchange=internet_exchange0
-            )
-        )
-
-        # Create a new IX
-        internet_exchange1 = InternetExchange.objects.create(name="Test1", slug="test1")
-
-        # Make sure it returns None when there is no session
-        self.assertIsNone(
-            InternetExchangePeeringSession.does_exist(
-                internet_exchange=internet_exchange1
-            )
-        )
-
-        # Create a new session with a already used IP in another OX
-        peering_session2 = InternetExchangePeeringSession.objects.create(
-            autonomous_system=autonomous_system0,
-            internet_exchange=internet_exchange1,
-            ip_address="2001:db8::1",
-        )
-
-        # Make sure that the session has been created
-        self.assertIsNotNone(peering_session2)
-        # Make sure we have None, because two sessions will be found
-        self.assertIsNone(
-            InternetExchangePeeringSession.does_exist(ip_address="2001:db8::1")
-        )
-        # But if we narrow the search with the IX we must have the proper
-        # session
-        self.assertEqual(
-            peering_session2,
-            InternetExchangePeeringSession.does_exist(
-                ip_address="2001:db8::1", internet_exchange=internet_exchange1
-            ),
         )
 
     def test_encrypt_password(self):
@@ -459,13 +394,6 @@ class InternetExchangePeeringSessionTest(TestCase):
         self.assertIsNone(peering_session.encrypted_password)
 
     def test_exists_in_peeringdb(self):
-        autonomous_system = AutonomousSystem.objects.create(asn=64500, name="Test")
-        internet_exchange = InternetExchange.objects.create(name="Test", slug="test")
-        InternetExchangePeeringSession.objects.create(
-            autonomous_system=autonomous_system,
-            internet_exchange=internet_exchange,
-            ip_address="2001:db8::1",
-        )
         self.assertFalse(
             InternetExchangePeeringSession.objects.get(
                 ip_address="2001:db8::1"
@@ -482,11 +410,27 @@ class InternetExchangePeeringSessionTest(TestCase):
         )
         self.assertFalse(peering_session.is_abandoned())
 
+    def test_poll(self):
+        with patch(
+            "peering.models.Router.get_bgp_neighbors_detail",
+            return_value=self.router.find_bgp_neighbor_detail(
+                json_file_to_python_type(
+                    "peering/tests/fixtures/get_bgp_neighbors_detail.json"
+                ),
+                "2001:db8::1",
+            ),
+        ):
+            self.assertTrue(self.session.poll())
+            self.assertEqual(567_257, self.session.received_prefix_count)
+
 
 class RouterTest(TestCase):
-    def setUp(self):
-        super().setUp()
-        self.router = Router.objects.create(
+    @classmethod
+    def setUpTestData(cls):
+        cls.bgp_neighbors_detail = json_file_to_python_type(
+            "peering/tests/fixtures/get_bgp_neighbors_detail.json"
+        )
+        cls.router = Router.objects.create(
             name="Test", hostname="test.example.com", platform=PLATFORM_JUNOS
         )
 
@@ -623,61 +567,154 @@ class RouterTest(TestCase):
     def test_bgp_neighbors_detail_as_list(self):
         expected = [
             {
+                "multipath": False,
+                "previous_connection_state": "OpenConfirm",
+                "configured_keepalive": 30,
+                "messages_queued_out": 0,
+                "routing_table": "global",
+                "keepalive": 30,
+                "input_messages": 26_006_050,
+                "remove_private_as": False,
+                "configured_holdtime": 0,
+                "suppress_4byte_as": False,
+                "suppressed_prefix_count": 0,
+                "local_address": "192.0.2.2",
+                "remote_address": "192.0.2.1",
+                "input_updates": 25_604_153,
+                "multihop": False,
+                "export_policy": "",
+                "remote_port": 54687,
+                "local_port": 179,
+                "active_prefix_count": 37358,
+                "output_messages": 383_524,
+                "import_policy": "",
+                "connection_state": "Established",
+                "received_prefix_count": 567_162,
+                "local_as": 64510,
+                "accepted_prefix_count": 566_998,
+                "router_id": "172.17.17.1",
+                "flap_count": 0,
+                "last_event": "RecvKeepAlive",
+                "holdtime": 90,
+                "local_as_prepend": True,
                 "up": True,
-                "local_as": 201281,
-                "remote_as": 29467,
-                "local_address": "198.51.100.1",
-            }
-        ]
-        bgp_neighbors_detail = {
-            "global": {
-                29467: [
-                    {
-                        "up": True,
-                        "local_as": 201281,
-                        "remote_as": 29467,
-                        "local_address": "198.51.100.1",
-                    }
-                ]
-            }
-        }
-
-        router = Router.objects.create(
-            name="test", hostname="test.example.com", platform=PLATFORM_JUNOS
-        )
-        self.assertEqual(
-            expected, router.bgp_neighbors_detail_as_list(bgp_neighbors_detail)
-        )
-
-
-class RoutingPolicyTest(TestCase):
-    def test_create(self):
-        routing_policy_list = [
-            {"name": "Test1", "slug": "test1", "type": None, "weight": 0},
+                "remote_as": 64500,
+                "local_address_configured": False,
+                "advertised_prefix_count": 111,
+                "output_updates": 524,
+            },
             {
-                "name": "Test2",
-                "slug": "test2",
-                "type": ROUTING_POLICY_TYPE_EXPORT,
-                "weight": 0,
+                "multipath": False,
+                "previous_connection_state": "EstabSync",
+                "configured_keepalive": 30,
+                "messages_queued_out": 0,
+                "routing_table": "global",
+                "keepalive": 30,
+                "input_messages": 12_094_123,
+                "remove_private_as": False,
+                "configured_holdtime": 0,
+                "suppress_4byte_as": False,
+                "suppressed_prefix_count": 0,
+                "local_address": "2001:db8::2",
+                "remote_address": "2001:db8::1",
+                "input_updates": 11_951_665,
+                "multihop": False,
+                "export_policy": "",
+                "remote_port": 50877,
+                "local_port": 179,
+                "active_prefix_count": 101_545,
+                "output_messages": 141_052,
+                "import_policy": "",
+                "connection_state": "Established",
+                "received_prefix_count": 567_257,
+                "local_as": 64510,
+                "accepted_prefix_count": 567_257,
+                "router_id": "192.168.100.1",
+                "flap_count": 2,
+                "last_event": "RecvKeepAlive",
+                "holdtime": 90,
+                "local_as_prepend": True,
+                "up": True,
+                "remote_as": 64501,
+                "local_address_configured": False,
+                "advertised_prefix_count": 111,
+                "output_updates": 158,
             },
         ]
 
-        for details in routing_policy_list:
-            if details["type"]:
-                routing_policy = RoutingPolicy.objects.create(
-                    name=details["name"], slug=details["slug"], type=details["type"]
-                )
-            else:
-                routing_policy = RoutingPolicy.objects.create(
-                    name=details["name"], slug=details["slug"]
-                )
+        self.assertEqual(
+            expected,
+            self.router.bgp_neighbors_detail_as_list(self.bgp_neighbors_detail),
+        )
 
-            self.assertIsNotNone(routing_policy)
-            self.assertEqual(details["name"], routing_policy.name)
-            self.assertEqual(details["slug"], routing_policy.slug)
-            self.assertEqual(
-                details["type"] or ROUTING_POLICY_TYPE_IMPORT, routing_policy.type
+    def test_find_bgp_neighbor_detail(self):
+        self.assertIsNone(
+            self.router.find_bgp_neighbor_detail(
+                self.bgp_neighbors_detail, "192.0.2.250"
             )
+        )
+        self.assertIsNone(
+            self.router.find_bgp_neighbor_detail(
+                self.bgp_neighbors_detail, ipaddress.ip_address("192.0.2.250")
+            )
+        )
+        self.assertIsNotNone(
+            self.router.find_bgp_neighbor_detail(self.bgp_neighbors_detail, "192.0.2.1")
+        )
+        self.assertIsNotNone(
+            self.router.find_bgp_neighbor_detail(
+                self.bgp_neighbors_detail, ipaddress.ip_address("192.0.2.1")
+            )
+        )
+        self.assertIsNone(
+            self.router.find_bgp_neighbor_detail(
+                self.bgp_neighbors_detail, "2001:db8::1337"
+            )
+        )
+        self.assertIsNone(
+            self.router.find_bgp_neighbor_detail(
+                self.bgp_neighbors_detail, ipaddress.ip_address("2001:db8::1337")
+            )
+        )
+        self.assertIsNotNone(
+            self.router.find_bgp_neighbor_detail(
+                self.bgp_neighbors_detail, "2001:db8::1"
+            )
+        )
+        self.assertIsNotNone(
+            self.router.find_bgp_neighbor_detail(
+                self.bgp_neighbors_detail, ipaddress.ip_address("2001:db8::1")
+            )
+        )
+
+    def test_set_napalm_configuration(self):
+        error, changes = self.router.set_napalm_configuration(None)
+        self.assertIsNotNone(error)
+        self.assertIsNone(changes)
+        error, changes = self.router.set_napalm_configuration({})
+        self.assertIsNotNone(error)
+        self.assertIsNone(changes)
+        error, changes = self.router.set_napalm_configuration("")
+        self.assertIsNotNone(error)
+        self.assertIsNone(changes)
+
+
+class RoutingPolicyTest(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.routing_policies = [
+            RoutingPolicy(
+                name="test-1", slug="test-1", type=ROUTING_POLICY_TYPE_EXPORT
+            ),
+            RoutingPolicy(
+                name="test-2", slug="test-2", type=ROUTING_POLICY_TYPE_IMPORT
+            ),
+            RoutingPolicy(
+                name="test-3", slug="test-3", type=ROUTING_POLICY_TYPE_IMPORT_EXPORT
+            ),
+            RoutingPolicy(name="test-4", slug="test-4", type="unknown"),
+        ]
+        RoutingPolicy.objects.bulk_create(cls.routing_policies)
 
     def test_get_type_html(self):
         expected = [
@@ -686,28 +723,18 @@ class RoutingPolicyTest(TestCase):
             '<span class="badge badge-dark">Import+Export</span>',
             '<span class="badge badge-secondary">Unknown</span>',
         ]
-        routing_policy_types = [
-            ROUTING_POLICY_TYPE_EXPORT,
-            ROUTING_POLICY_TYPE_IMPORT,
-            ROUTING_POLICY_TYPE_IMPORT_EXPORT,
-            "unknown",
-        ]
 
-        for i in range(len(routing_policy_types)):
-            self.assertEqual(
-                expected[i],
-                RoutingPolicy.objects.create(
-                    name="test{}".format(i),
-                    slug="test{}".format(i),
-                    type=routing_policy_types[i],
-                ).get_type_html(),
-            )
+        for i in range(len(expected)):
+            self.assertEqual(expected[i], self.routing_policies[i].get_type_html())
 
 
 class TemplateTest(TestCase):
-    def setUp(self):
-        super().setUp()
-        self.template = Template(name="Test", template="{{ test }}")
+    @classmethod
+    def setUpTestData(cls):
+        cls.template = Template.objects.create(name="Test", template="{{ test }}")
 
     def test_render(self):
         self.assertEqual(self.template.render({"test": "test"}), "test")
+
+    def test_render_preview(self):
+        self.assertEqual(self.template.render_preview(), "")

@@ -50,6 +50,7 @@ class AbstractGroup(ChangeLoggedModel, TaggableModel, TemplateModel):
 
     class Meta:
         abstract = True
+        ordering = ["name", "slug"]
 
     def get_peering_sessions_list_url(self):
         raise NotImplementedError
@@ -64,6 +65,7 @@ class AbstractGroup(ChangeLoggedModel, TaggableModel, TemplateModel):
 class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
     asn = ASNField(unique=True)
     name = models.CharField(max_length=128)
+    name_peeringdb_sync = models.BooleanField(default=True)
     contact_name = models.CharField(max_length=50, blank=True)
     contact_phone = models.CharField(max_length=20, blank=True)
     contact_email = models.EmailField(blank=True, verbose_name="Contact E-mail")
@@ -85,6 +87,8 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
     )
     prefixes = JSONField(blank=True, null=True, editable=False)
 
+    logger = logging.getLogger("peering.manager.peering")
+
     class Meta:
         ordering = ["asn"]
         permissions = [("send_email", "Can send e-mails to AS contact")]
@@ -96,13 +100,6 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         if self.get_peeringdb_contacts():
             return True
         return False
-
-    @staticmethod
-    def does_exist(asn):
-        try:
-            return AutonomousSystem.objects.get(asn=asn)
-        except AutonomousSystem.DoesNotExist:
-            return None
 
     @staticmethod
     def create_from_peeringdb(asn):
@@ -127,7 +124,7 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         return autonomous_system
 
     def get_absolute_url(self):
-        return reverse("peering:autonomous_system_details", kwargs={"asn": self.asn})
+        return reverse("peering:autonomoussystem_details", kwargs={"asn": self.asn})
 
     def get_peeringdb_network(self):
         try:
@@ -137,14 +134,13 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
 
     def get_internet_exchange_peering_sessions_list_url(self):
         return reverse(
-            "peering:autonomous_system_internet_exchange_peering_sessions",
+            "peering:autonomoussystem_internet_exchange_peering_sessions",
             kwargs={"asn": self.asn},
         )
 
     def get_direct_peering_sessions_list_url(self):
         return reverse(
-            "peering:autonomous_system_direct_peering_sessions",
-            kwargs={"asn": self.asn},
+            "peering:autonomoussystem_direct_peering_sessions", kwargs={"asn": self.asn}
         )
 
     def get_peering_sessions(self):
@@ -167,7 +163,7 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         common = PeeringDB().get_common_ix_networks_for_asns(settings.MY_ASN, self.asn)
         return InternetExchange.objects.filter(
             peeringdb_id__in=[us.id for us, _ in common]
-        )
+        ).order_by("name", "slug")
 
     def find_potential_ix_peering_sessions(self):
         """
@@ -184,15 +180,9 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
             peering_sessions = []
 
             if peer.ipaddr6:
-                try:
-                    peering_sessions.append(str(ipaddress.IPv6Address(peer.ipaddr6)))
-                except ipaddress.AddressValueError:
-                    continue
+                peering_sessions.append(peer.ipaddr6)
             if peer.ipaddr4:
-                try:
-                    peering_sessions.append(str(ipaddress.IPv4Address(peer.ipaddr4)))
-                except ipaddress.AddressValueError:
-                    continue
+                peering_sessions.append(peer.ipaddr4)
 
             # Get all known sessions for this AS on the given IX
             known_sessions = InternetExchangePeeringSession.objects.filter(
@@ -254,10 +244,12 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
             missing_sessions = {"ipv6": [], "ipv4": []}
             for session in self.potential_internet_exchange_peering_sessions:
                 for prefix in internet_exchange.get_prefixes():
-                    if session in ipaddress.ip_network(prefix):
-                        missing_sessions["ipv{}".format(session.version)].append(
-                            session
-                        )
+                    if (
+                        session not in missing_sessions["ipv6"]
+                        and session not in missing_sessions["ipv4"]
+                    ):
+                        if session in ipaddress.ip_network(prefix):
+                            missing_sessions[f"ipv{session.version}"].append(session)
 
             ix_and_sessions.append(
                 {
@@ -274,6 +266,21 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
 
         return ix_and_sessions
 
+    def get_available_sessions(self):
+        missing_sessions = self.potential_internet_exchange_peering_sessions
+
+        return (
+            PeerRecord.objects.filter(
+                (
+                    Q(network_ixlan__ipaddr6__in=missing_sessions)
+                    | Q(network_ixlan__ipaddr4__in=missing_sessions)
+                )
+            )
+            .prefetch_related("network")
+            .prefetch_related("network_ixlan")
+            .order_by("network_ixlan__name", "network_ixlan__ipaddr6")
+        )
+
     def synchronize_with_peeringdb(self):
         """
         Synchronize AS properties with those found in PeeringDB.
@@ -284,10 +291,8 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
         if not peeringdb_info:
             return False
 
-        # Always synchronize the name
-        self.name = peeringdb_info.name
-
-        # Sync other properties if we are told to do so
+        if self.name_peeringdb_sync:
+            self.name = peeringdb_info.name
         if self.irr_as_set_peeringdb_sync:
             self.irr_as_set = peeringdb_info.irr_as_set
         if self.ipv6_max_prefixes_peeringdb_sync:
@@ -302,20 +307,39 @@ class AutonomousSystem(ChangeLoggedModel, TaggableModel, TemplateModel):
 
     def retrieve_irr_as_set_prefixes(self):
         """
-        Return a prefix list for this AS' IRR AS-SET. If none is provided the list
-        will be empty.
+        Return a prefix list for this AS' IRR AS-SET. If none is provided the function
+        will try to look for a prefix list based on the AS number.
 
         This function will actually retrieve prefixes from IRR online sources. It is
         expected to be slow due to network operations and depending on the size of the
         data to process.
         """
+        fallback = False
         as_sets = parse_irr_as_set(self.asn, self.irr_as_set)
         prefixes = {"ipv6": [], "ipv4": []}
 
-        # For each AS-SET try getting IPv6 and IPv4 prefixes
-        for as_set in as_sets:
-            prefixes["ipv6"].extend(call_irr_as_set_resolver(as_set, address_family=6))
-            prefixes["ipv4"].extend(call_irr_as_set_resolver(as_set, address_family=4))
+        try:
+            # For each AS-SET try getting IPv6 and IPv4 prefixes
+            for as_set in as_sets:
+                prefixes["ipv6"].extend(
+                    call_irr_as_set_resolver(as_set, address_family=6)
+                )
+                prefixes["ipv4"].extend(
+                    call_irr_as_set_resolver(as_set, address_family=4)
+                )
+        except ValueError:
+            # Error parsing AS-SETs
+            fallback = True
+
+        # If fallback is triggered or no prefixes found, try prefix lookup by ASN
+        if fallback or not prefixes["ipv6"] and not prefixes["ipv4"]:
+            self.logger.debug("falling back to AS number lookup")
+            prefixes["ipv6"].extend(
+                call_irr_as_set_resolver(f"AS{self.asn}", address_family=6)
+            )
+            prefixes["ipv4"].extend(
+                call_irr_as_set_resolver(f"AS{self.asn}", address_family=4)
+            )
 
         return prefixes
 
@@ -398,14 +422,14 @@ class BGPGroup(AbstractGroup):
     logger = logging.getLogger("peering.manager.peering")
 
     class Meta:
-        ordering = ["name"]
+        ordering = ["name", "slug"]
         verbose_name = "BGP group"
 
     def get_absolute_url(self):
-        return reverse("peering:bgp_group_details", kwargs={"slug": self.slug})
+        return reverse("peering:bgpgroup_details", kwargs={"slug": self.slug})
 
     def get_peering_sessions_list_url(self):
-        return reverse("peering:bgp_group_peering_sessions", kwargs={"slug": self.slug})
+        return reverse("peering:bgpgroup_peering_sessions", kwargs={"slug": self.slug})
 
     def get_peering_sessions(self):
         return self.directepeeringsession_set.all()
@@ -552,6 +576,10 @@ class BGPSession(ChangeLoggedModel, TaggableModel, TemplateModel):
 
     class Meta:
         abstract = True
+        ordering = ["autonomous_system", "ip_address"]
+
+    def poll(self):
+        raise NotImplementedError
 
     @property
     def ip_address_version(self):
@@ -613,7 +641,12 @@ class BGPSession(ChangeLoggedModel, TaggableModel, TemplateModel):
                     self.save()
             return
 
-        encrypt = junos_encrypt if platform == PLATFORM_JUNOS else cisco_encrypt
+        # Choose encryption/decryption method
+        encrypt = junos_encrypt
+        decrypt = junos_decrypt
+        if platform != PLATFORM_JUNOS:
+            encrypt = cisco_encrypt
+            decrypt = cisco_decrypt
 
         if not self.encrypted_password:
             # If the password is not encrypted yet, do it
@@ -637,6 +670,11 @@ class BGPSession(ChangeLoggedModel, TaggableModel, TemplateModel):
                     self.encrypted_password = encrypt(
                         junos_decrypt(self.encrypted_password)
                     )
+
+        # Check if the encrypted password matches the clear one
+        # Force encryption if there a difference
+        if self.password != decrypt(self.encrypted_password):
+            self.encrypted_password = encrypt(self.password)
 
         if commit:
             self.save()
@@ -704,7 +742,46 @@ class DirectPeeringSession(BGPSession):
         super().save(*args, **kwargs)
 
     def get_absolute_url(self):
-        return reverse("peering:direct_peering_session_details", kwargs={"pk": self.pk})
+        return reverse("peering:directpeeringsession_details", kwargs={"pk": self.pk})
+
+    def poll(self):
+        # Check if we are able to get BGP details
+        log = 'ignoring session states on {}, reason: "{}"'
+        if not self.router:
+            log = log.format(self.name.lower(), "no router attached")
+        elif not self.router.can_napalm_get_bgp_neighbors_detail():
+            log = log.format(
+                self.name.lower(),
+                "router with unsupported platform {}".format(self.router.platform),
+            )
+        elif self.bgp_group and not self.bgp_group.check_bgp_session_states:
+            log = log.format(self.name.lower(), "check disabled")
+        else:
+            log = None
+
+        # If we cannot check for BGP details, don't do anything
+        if log:
+            self.logger.debug(log)
+            return False
+
+        # Get BGP session detail
+        bgp_neighbor_detail = self.router.get_bgp_neighbors_detail(
+            ip_address=self.ip_address
+        )
+        if bgp_neighbor_detail:
+            received = bgp_neighbor_detail["received_prefix_count"]
+            advertised = bgp_neighbor_detail["advertised_prefix_count"]
+
+            # Update fields
+            self.bgp_state = bgp_neighbor_detail["connection_state"].lower()
+            self.received_prefix_count = received if received > 0 else 0
+            self.advertised_prefix_count = advertised if advertised > 0 else 0
+            if self.bgp_state == BGP_STATE_ESTABLISHED:
+                self.last_established_state = timezone.now()
+            self.save()
+            return True
+
+        return False
 
     def get_relationship_html(self):
         if self.relationship == BGP_RELATIONSHIP_CUSTOMER:
@@ -750,11 +827,11 @@ class InternetExchange(AbstractGroup):
     logger = logging.getLogger("peering.manager.peering")
 
     def get_absolute_url(self):
-        return reverse("peering:internet_exchange_details", kwargs={"slug": self.slug})
+        return reverse("peering:internetexchange_details", kwargs={"slug": self.slug})
 
     def get_peering_sessions_list_url(self):
         return reverse(
-            "peering:internet_exchange_peering_sessions", kwargs={"slug": self.slug}
+            "peering:internetexchange_peering_sessions", kwargs={"slug": self.slug}
         )
 
     def get_peer_list_url(self):
@@ -882,9 +959,16 @@ class InternetExchange(AbstractGroup):
                             "ip %s fits in prefix %s", ip_address, str(prefix)
                         )
 
-                        if not InternetExchangePeeringSession.does_exist(
-                            ip_address=ip_address, internet_exchange=self
-                        ):
+                        try:
+                            InternetExchangePeeringSession.objects.get(
+                                ip_address=ip_address, internet_exchange=self
+                            )
+                            self.logger.debug(
+                                "session %s with as%s already exists",
+                                ip_address,
+                                remote_asn,
+                            )
+                        except InternetExchangePeeringSession.DoesNotExist:
                             self.logger.debug(
                                 "session %s with as%s does not exist",
                                 ip_address,
@@ -893,8 +977,12 @@ class InternetExchange(AbstractGroup):
 
                             # Grab the AS, create it if it does not exist in
                             # the database yet
-                            autonomous_system = AutonomousSystem.does_exist(remote_asn)
-                            if not autonomous_system:
+                            autonomous_system = None
+                            try:
+                                autonomous_system = AutonomousSystem.objects.get(
+                                    asn=remote_asn
+                                )
+                            except AutonomousSystem.DoesNotExist:
                                 self.logger.debug(
                                     "as%s not present importing from peeringdb",
                                     remote_asn,
@@ -932,12 +1020,6 @@ class InternetExchange(AbstractGroup):
                                 peering_session.save()
                                 number_of_peering_sessions += 1
                                 self.logger.debug("session %s created", ip_address)
-                        else:
-                            self.logger.debug(
-                                "session %s with as%s already exists",
-                                ip_address,
-                                remote_asn,
-                            )
                     else:
                         self.logger.debug(
                             "ip %s do not fit in prefix %s",
@@ -1025,10 +1107,10 @@ class InternetExchange(AbstractGroup):
                         )
 
                         # Check if the BGP session is on this IX
-                        peering_session = InternetExchangePeeringSession.does_exist(
-                            internet_exchange=self, ip_address=ip_address
-                        )
-                        if peering_session:
+                        try:
+                            peering_session = InternetExchangePeeringSession.objects.get(
+                                internet_exchange=self, ip_address=ip_address
+                            )
                             # Get the BGP state for the session
                             state = session["connection_state"].lower()
                             received = session["received_prefix_count"]
@@ -1052,7 +1134,7 @@ class InternetExchange(AbstractGroup):
                             if peering_session.bgp_state == BGP_STATE_ESTABLISHED:
                                 peering_session.last_established_state = timezone.now()
                             peering_session.save()
-                        else:
+                        except InternetExchangePeeringSession.DoesNotExist:
                             self.logger.debug(
                                 "session %s in %s not found",
                                 ip_address,
@@ -1079,29 +1161,32 @@ class InternetExchangePeeringSession(BGPSession):
         ordering = ["autonomous_system", "ip_address"]
 
     @staticmethod
-    def does_exist(internet_exchange=None, autonomous_system=None, ip_address=None):
-        """
-        Returns a InternetExchangePeeringSession object or None based on the positional
-        arguments. If several objects are found, None is returned.
+    def get_ix_list_for_peer_record(peer_record):
+        ix_list = []
+        # Find the Internet exchange given a NetworkIXLAN ID
+        for ix in InternetExchange.objects.exclude(peeringdb_id__isnull=True).exclude(
+            peeringdb_id=0
+        ):
+            # Get the IXLAN corresponding to our network
+            try:
+                ixlan = NetworkIXLAN.objects.get(id=ix.peeringdb_id)
+            except NetworkIXLAN.DoesNotExist:
+                InternetExchangePeeringSession.logger.debug(
+                    "NetworkIXLAN with ID {} not found, ignoring IX {}".format(
+                        ix.peeringdb_id, ix.name
+                    )
+                )
+                continue
 
-        TODO: the method must be reworked in order to have its proper return
-        value if multiple objects are found.
-        """
-        # Filter based on fields that are not None
-        filter = {}
-        if internet_exchange:
-            filter.update({"internet_exchange": internet_exchange})
-        if autonomous_system:
-            filter.update({"autonomous_system": autonomous_system})
-        if ip_address:
-            filter.update({"ip_address": ip_address})
+            # Get a potentially matching IXLAN
+            peer_ixlan = NetworkIXLAN.objects.filter(
+                id=peer_record.network_ixlan.id, ix_id=ixlan.ix_id
+            )
 
-        try:
-            return InternetExchangePeeringSession.objects.get(**filter)
-        except InternetExchangePeeringSession.DoesNotExist:
-            return None
-        except InternetExchangePeeringSession.MultipleObjectsReturned:
-            return None
+            # IXLAN found lets get out
+            if peer_ixlan:
+                ix_list.append(ix)
+        return ix_list
 
     @staticmethod
     def create_from_peeringdb(peer_record, ip_version, internet_exchange=None):
@@ -1118,28 +1203,10 @@ class InternetExchangePeeringSession(BGPSession):
         if internet_exchange:
             found_internet_exchange = internet_exchange
         else:
-            # Find the Internet exchange given a NetworkIXLAN ID
-            for ix in InternetExchange.objects.exclude(peeringdb_id__isnull=True):
-                # Get the IXLAN corresponding to our network
-                try:
-                    ixlan = NetworkIXLAN.objects.get(id=ix.peeringdb_id)
-                except NetworkIXLAN.DoesNotExist:
-                    InternetExchangePeeringSession.logger.debug(
-                        "NetworkIXLAN with ID {} not found, ignoring IX {}".format(
-                            ix.peeringdb_id, ix.name
-                        )
-                    )
-                    continue
-
-                # Get a potentially matching IXLAN
-                peer_ixlan = NetworkIXLAN.objects.filter(
-                    id=peer_record.network_ixlan.id, ix_id=ixlan.ix_id
-                )
-
-                # IXLAN found lets get out
-                if peer_ixlan:
-                    found_internet_exchange = ix
-                    break
+            ix_list = InternetExchangePeeringSession.get_ix_list_for_peer_record(
+                peer_record
+            )
+            found_internet_exchange = ix_list[0]
 
         # Unable to find the Internet exchange, no point of going further
         if not found_internet_exchange:
@@ -1174,24 +1241,22 @@ class InternetExchangePeeringSession(BGPSession):
         )
 
         # Try to get the session, in case it already exists
-        session = InternetExchangePeeringSession.does_exist(
-            autonomous_system=autonomous_system,
-            internet_exchange=internet_exchange,
-            ip_address=ip_address,
-        )
-
-        # Session exists, nothing to do
-        if session:
+        try:
+            session = InternetExchangePeeringSession.objects.get(
+                autonomous_system=autonomous_system,
+                internet_exchange=internet_exchange,
+                ip_address=ip_address,
+            )
+            # Session exists, nothing to do
             return (session, False)
-
-        # Create the session but do not save it
-        session = InternetExchangePeeringSession(
-            autonomous_system=autonomous_system,
-            internet_exchange=internet_exchange,
-            ip_address=ip_address,
-        )
-
-        return (session, True)
+        except InternetExchangePeeringSession.DoesNotExist:
+            # Create the session but do not save it
+            session = InternetExchangePeeringSession(
+                autonomous_system=autonomous_system,
+                internet_exchange=internet_exchange,
+                ip_address=ip_address,
+            )
+            return (session, True)
 
     def save(self, *args, **kwargs):
         # Remove the IP address of this session from potential sessions for the AS
@@ -1216,8 +1281,47 @@ class InternetExchangePeeringSession(BGPSession):
 
     def get_absolute_url(self):
         return reverse(
-            "peering:internet_exchange_peering_session_details", kwargs={"pk": self.pk}
+            "peering:internetexchangepeeringsession_details", kwargs={"pk": self.pk}
         )
+
+    def poll(self):
+        # Check if we are able to get BGP details
+        log = 'ignoring session states on {}, reason: "{}"'
+        if not self.internet_exchange.router:
+            log = log.format(self.name.lower(), "no router attached")
+        elif not self.internet_exchange.router.can_napalm_get_bgp_neighbors_detail():
+            log = log.format(
+                self.name.lower(),
+                "router with unsupported platform {}".format(self.router.platform),
+            )
+        elif not self.internet_exchange.check_bgp_session_states:
+            log = log.format(self.name.lower(), "check disabled")
+        else:
+            log = None
+
+        # If we cannot check for BGP details, don't do anything
+        if log:
+            self.logger.debug(log)
+            return False
+
+        # Get BGP session detail
+        bgp_neighbor_detail = self.internet_exchange.router.get_bgp_neighbors_detail(
+            ip_address=self.ip_address
+        )
+        if bgp_neighbor_detail:
+            received = bgp_neighbor_detail["received_prefix_count"]
+            advertised = bgp_neighbor_detail["advertised_prefix_count"]
+
+            # Update fields
+            self.bgp_state = bgp_neighbor_detail["connection_state"].lower()
+            self.received_prefix_count = received if received > 0 else 0
+            self.advertised_prefix_count = advertised if advertised > 0 else 0
+            if self.bgp_state == BGP_STATE_ESTABLISHED:
+                self.last_established_state = timezone.now()
+            self.save()
+            return True
+
+        return False
 
     def exists_in_peeringdb(self):
         """
@@ -1280,13 +1384,17 @@ class Router(ChangeLoggedModel, TaggableModel):
     configuration_template = models.ForeignKey(
         "Template", blank=True, null=True, on_delete=models.SET_NULL
     )
-    comments = models.TextField(blank=True)
     netbox_device_id = models.PositiveIntegerField(blank=True, default=0)
     use_netbox = models.BooleanField(
         blank=True,
         default=False,
         help_text="Use NetBox to communicate instead of NAPALM",
     )
+    napalm_username = models.CharField(blank=True, max_length=256)
+    napalm_password = models.CharField(blank=True, max_length=256)
+    napalm_timeout = models.PositiveIntegerField(blank=True, default=0)
+    napalm_args = JSONField(blank=True, null=True)
+    comments = models.TextField(blank=True)
 
     logger = logging.getLogger("peering.manager.napalm")
 
@@ -1299,6 +1407,9 @@ class Router(ChangeLoggedModel, TaggableModel):
 
     def get_absolute_url(self):
         return reverse("peering:router_details", kwargs={"pk": self.pk})
+
+    def get_direct_peering_sessions_list_url(self):
+        return reverse("peering:router_direct_peering_sessions", kwargs={"pk": self.pk})
 
     def is_netbox_device(self):
         return self.netbox_device_id != 0
@@ -1322,6 +1433,9 @@ class Router(ChangeLoggedModel, TaggableModel):
                 .prefetch_related("import_routing_policies")
                 .prefetch_related("export_routing_policies")
                 .prefetch_related("tags")
+                .prefetch_related("autonomous_system__tags")
+                .prefetch_related("autonomous_system__import_routing_policies")
+                .prefetch_related("autonomous_system__export_routing_policies")
                 .select_related("autonomous_system")
             )
             ipv6_sessions = [
@@ -1360,7 +1474,16 @@ class Router(ChangeLoggedModel, TaggableModel):
                 .prefetch_related("import_routing_policies")
                 .prefetch_related("export_routing_policies")
                 .prefetch_related("tags")
+                .prefetch_related("internet_exchange__communities")
+                .prefetch_related("internet_exchange__import_routing_policies")
+                .prefetch_related("internet_exchange__export_routing_policies")
+                .prefetch_related("internet_exchange__tags")
+                .prefetch_related("autonomous_system__tags")
+                .prefetch_related("autonomous_system__import_routing_policies")
+                .prefetch_related("autonomous_system__export_routing_policies")
                 .select_related("autonomous_system")
+                .select_related("internet_exchange")
+                .select_related("internet_exchange__router")
             )
             dict = internet_exchange.to_dict()
             dict.update(
@@ -1379,6 +1502,13 @@ class Router(ChangeLoggedModel, TaggableModel):
             )
             internet_exchanges.append(dict)
         return internet_exchanges
+
+    def get_peering_sessions(self):
+        return (
+            InternetExchangePeeringSession.objects.filter(
+                internet_exchange__router=self
+            ).order_by("internet_exchange", "ip_address")
+        ).all()
 
     def get_configuration_context(self):
         context = {
@@ -1421,10 +1551,10 @@ class Router(ChangeLoggedModel, TaggableModel):
             self.logger.debug('found napalm driver "%s"', self.platform)
             return driver(
                 hostname=self.hostname,
-                username=settings.NAPALM_USERNAME,
-                password=settings.NAPALM_PASSWORD,
-                timeout=settings.NAPALM_TIMEOUT,
-                optional_args=settings.NAPALM_ARGS,
+                username=self.napalm_username or settings.NAPALM_USERNAME,
+                password=self.napalm_password or settings.NAPALM_PASSWORD,
+                timeout=self.napalm_timeout or settings.NAPALM_TIMEOUT,
+                optional_args=self.napalm_args or settings.NAPALM_ARGS,
             )
         except napalm.base.exceptions.ModuleImportError:
             # Unable to import proper driver from napalm
@@ -1522,6 +1652,12 @@ class Router(ChangeLoggedModel, TaggableModel):
         """
         error = changes = None
 
+        # Make sure there actually a configuration to merge
+        if config is None or not isinstance(config, str) or not config.strip():
+            self.logger.debug("no configuration to merge: %s", config)
+            error = f"no configuration found to be merged"
+            return error, changes
+
         device = self.get_napalm_device()
         opened = self.open_napalm_device(device)
 
@@ -1547,15 +1683,11 @@ class Router(ChangeLoggedModel, TaggableModel):
                     self.logger.debug("discarding configuration on %s", self.hostname)
                     device.discard_config()
             except napalm.base.exceptions.MergeConfigException as e:
-                error = 'unable to merge configuration on {} reason "{}"'.format(
-                    self.hostname, e
-                )
+                error = f'unable to merge configuration on {self.hostname} reason "{e}"'
                 changes = None
                 self.logger.debug(error)
             except Exception as e:
-                error = 'unable to merge configuration on {} reason "{}"'.format(
-                    self.hostname, e
-                )
+                error = f'unable to merge configuration on {self.hostname} reason "{e}"'
                 changes = None
                 self.logger.debug(error)
             else:
@@ -1569,7 +1701,7 @@ class Router(ChangeLoggedModel, TaggableModel):
                         "error while closing connection with %s", self.hostname
                     )
         else:
-            error = "Unable to connect to {}".format(self.hostname)
+            error = f"Unable to connect to {self.hostname}"
 
         return error, changes
 
@@ -1704,7 +1836,30 @@ class Router(ChangeLoggedModel, TaggableModel):
         else:
             return self.get_napalm_bgp_neighbors()
 
-    def get_napalm_bgp_neighbors_detail(self):
+    def find_bgp_neighbor_detail(self, bgp_neighbors, ip_address):
+        """
+        Finds and returns a single BGP neighbor amongst others.
+        """
+        # NAPALM dict expected
+        if not isinstance(bgp_neighbors, dict):
+            return None
+
+        # Make sure to use an IP object
+        if isinstance(ip_address, str):
+            ip_address = ipaddress.ip_address(ip_address)
+
+        for _, asn in bgp_neighbors.items():
+            for _, neighbors in asn.items():
+                for neighbor in neighbors:
+                    neighbor_ip_address = ipaddress.ip_address(
+                        neighbor["remote_address"]
+                    )
+                    if ip_address == neighbor_ip_address:
+                        return neighbor
+
+        return None
+
+    def get_napalm_bgp_neighbors_detail(self, ip_address=None):
         """
         Returns a list of dictionaries listing all BGP neighbors found on the
         router using NAPALM and there respective detail.
@@ -1735,9 +1890,13 @@ class Router(ChangeLoggedModel, TaggableModel):
                     "error while closing connection with %s", self.hostname
                 )
 
-        return bgp_neighbors_detail
+        return (
+            bgp_neighbors_detail
+            if not ip_address
+            else self.find_bgp_neighbor_detail(bgp_neighbors_detail, ip_address)
+        )
 
-    def get_netbox_bgp_neighbors_detail(self):
+    def get_netbox_bgp_neighbors_detail(self, ip_address=None):
         """
         Returns a list of dictionaries listing all BGP neighbors found on the
         router using NetBox and their respective detail.
@@ -1758,21 +1917,28 @@ class Router(ChangeLoggedModel, TaggableModel):
             self.hostname,
         )
 
-        return bgp_neighbors_detail
+        return (
+            bgp_neighbors_detail
+            if not ip_address
+            else self.find_bgp_neighbor_detail(bgp_neighbors_detail, ip_address)
+        )
 
-    def get_bgp_neighbors_detail(self):
+    def get_bgp_neighbors_detail(self, ip_address=None):
         """
-        Returns a list of dictionaries listing all BGP neighbors found on the
-        router using either NAPALM or NetBox depending on the use_netbox flag
-        and their respective detail.
+        Returns a list of dictionaries listing all BGP neighbors found on the router
+        using either NAPALM or NetBox depending on the use_netbox flag and their
+        respective detail.
+
+        If the `ip_address` named parameter is not `None`, only the neighbor with this
+        IP address will be returned
 
         If an error occurs or no BGP neighbors can be found, the returned list
         will be empty.
         """
         if self.use_netbox:
-            return self.get_netbox_bgp_neighbors_detail()
+            return self.get_netbox_bgp_neighbors_detail(ip_address=ip_address)
         else:
-            return self.get_napalm_bgp_neighbors_detail()
+            return self.get_napalm_bgp_neighbors_detail(ip_address=ip_address)
 
     def bgp_neighbors_detail_as_list(self, bgp_neighbors_detail):
         """
@@ -1868,7 +2034,7 @@ class RoutingPolicy(ChangeLoggedModel, TaggableModel, TemplateModel):
         ordering = ["-weight", "name"]
 
     def get_absolute_url(self):
-        return reverse("peering:routing_policy_details", kwargs={"pk": self.pk})
+        return reverse("peering:routingpolicy_details", kwargs={"pk": self.pk})
 
     def get_type_html(self):
         if self.type == ROUTING_POLICY_TYPE_EXPORT:
@@ -1938,7 +2104,87 @@ class Template(ChangeLoggedModel, TaggableModel):
             jinja2_template = environment.from_string(self.template)
             return jinja2_template.render(variables)
         except TemplateSyntaxError as e:
-            return "Syntax error in template at line {}: {}".format(e.lineno, e.message)
+            return f"Syntax error in template at line {e.lineno}: {e.message}"
+        except Exception as e:
+            return str(e)
+
+    def render_preview(self):
+        """
+        Render the template using Jinja2 for previewing it.
+        """
+        variables = None
+
+        # Variables for template preview
+        a_s = AutonomousSystem(
+            asn=64501, name="ACME", ipv6_max_prefixes=50, ipv4_max_prefixes=100
+        )
+        a_s.tags = ["foo", "bar"]
+        i_x = InternetExchange(
+            name="Wakanda-IX",
+            slug="wakanda-ix",
+            ipv6_address="2001:db8:a::ffff",
+            ipv4_address="192.0.2.128",
+        )
+        i_x.tags = ["foo", "bar"]
+        group = BGPGroup(name="Transit Providers", slug="transit")
+        group.tags = ["foo", "bar"]
+        dps6 = DirectPeeringSession(
+            local_asn=settings.MY_ASN,
+            autonomous_system=a_s,
+            ip_address="2001:db8::1",
+            relationship=BGP_RELATIONSHIP_TRANSIT_PROVIDER,
+        )
+        dps6.tags = ["foo", "bar"]
+        dps4 = DirectPeeringSession(
+            local_asn=settings.MY_ASN,
+            autonomous_system=a_s,
+            ip_address="192.0.2.1",
+            relationship=BGP_RELATIONSHIP_PRIVATE_PEERING,
+        )
+        dps4.tags = ["foo", "bar"]
+        ixps6 = InternetExchangePeeringSession(
+            autonomous_system=a_s, internet_exchange=i_x, ip_address="2001:db8:a::aaaa"
+        )
+        ixps6.tags = ["foo", "bar"]
+        ixps4 = InternetExchangePeeringSession(
+            autonomous_system=a_s, internet_exchange=i_x, ip_address="192.0.2.64"
+        )
+        ixps4.tags = ["foo", "bar"]
+
+        if self.type == TEMPLATE_TYPE_EMAIL:
+            variables = {
+                "my_asn": settings.MY_ASN,
+                "autonomous_system": a_s,
+                "internet_exchanges": [
+                    {
+                        "internet_exchange": i_x,
+                        "sessions": [],
+                        "missing_sessions": {
+                            "ipv6": ["2001:db8:a::aaaa"],
+                            "ipv4": ["192.0.2.64"],
+                        },
+                    }
+                ],
+                "direct_peering_sessions": [dps6, dps4],
+            }
+        else:
+            group.sessions = {6: [dps6], 4: [dps4]}
+            i_x.sessions = {6: [ixps6], 4: [ixps4]}
+            variables = {
+                "my_asn": settings.MY_ASN,
+                "bgp_groups": [group],
+                "internet_exchanges": [i_x],
+                "routing_policies": [
+                    RoutingPolicy(
+                        name="Export/Import None",
+                        slug="none",
+                        type=ROUTING_POLICY_TYPE_IMPORT_EXPORT,
+                    )
+                ],
+                "communities": [Community(name="Community Transit", value="64500:1")],
+            }
+
+        return self.render(variables)
 
     def __str__(self):
         return self.name

@@ -4,10 +4,10 @@ from django.db.models import Q
 
 import django_filters
 
-from .models import PeerRecord, Synchronization
+from .models import PeerRecord, Synchronization, Contact, Network
 
 
-class PeerRecordFilter(django_filters.FilterSet):
+class PeerRecordFilterSet(django_filters.FilterSet):
     q = django_filters.CharFilter(method="search", label="Search")
 
     class Meta:
@@ -42,7 +42,19 @@ class PeerRecordFilter(django_filters.FilterSet):
         return queryset.filter(qs_filter)
 
 
-class SynchronizationFilter(django_filters.FilterSet):
+class SynchronizationFilterSet(django_filters.FilterSet):
     class Meta:
         model = Synchronization
         fields = ["time", "added", "updated", "deleted"]
+
+
+class ContactFilterSet(django_filters.FilterSet):
+    class Meta:
+        model = Contact
+        fields = ["role", "name", "email", "net_id"]
+
+
+class NetworkFilterSet(django_filters.FilterSet):
+    class Meta:
+        model = Network
+        fields = ["asn", "name"]

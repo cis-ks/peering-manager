@@ -29,16 +29,20 @@ If Peering Manager is used to generate configuration stanzas and push them to
 routers, this task can be automated using the given command.
 
 ```no-highlight
-# python3 manage.py configure_routers
+# python3 manage.py configure_routers --no-commit-check
 ```
 
-This will generate the configuration for each IX and push it to the attached
-router if there is one.  If there are no new peering sessions to be deployed,
-this command is also useful to deploy any new configuration information, such
-as maximum prefix changes peers may have made against existing peering sessions.
+This will generate the configuration for each router and push it. If there are
+no new peering sessions to be deployed, this command is also useful to deploy
+any new configuration information, such as maximum prefix changes peers may
+have made against existing peering sessions.
 
-If no configuration template or no router is attached to a given IX, this one
-will be ignored during the execution of the task.
+If the `--no-commit-check` flag is set, the command will try to push the
+configuration on the router without checking if there are any changes to be
+deployed.
+
+If no configuration template is attached to a given router, it will be ignored
+during the execution of the task.
 
 ## Poll Peering Sessions
 
@@ -73,8 +77,13 @@ invalidations of the prefixes found in the database, so make sure to run this
 command at regular intervals to keep data up-to-date.
 
 ```no-highlight
-# python3 manage.py grab_prefixes
+# python3 manage.py grab_prefixes --limit 100
 ```
+
+If the `--limit 100` flag is set, the command will not store prefixes for an IP
+family if the number of prefixes is greater than 100. This can help to avoid
+storing large number of prefixes for a single autonomous system, preventing out
+of memory errors for future database lookups.
 
 ## CRON
 

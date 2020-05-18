@@ -83,14 +83,17 @@ except ImportError:
         "Configuration file is not present. Please define peering_manager/configuration.py per the documentation."
     )
 
-DATABASE = SECRET_KEY = ALLOWED_HOSTS = MY_ASN = None
-for setting in ["DATABASE", "SECRET_KEY", "ALLOWED_HOSTS", "MY_ASN"]:
-    try:
-        globals()[setting] = getattr(configuration, setting)
-    except AttributeError:
+for setting in ["ALLOWED_HOSTS", "DATABASE", "SECRET_KEY", "MY_ASN"]:
+    if not hasattr(configuration, setting):
         raise ImproperlyConfigured(
             "Mandatory setting {} is not in the configuration.py file.".format(setting)
         )
+
+# Set required parameters
+ALLOWED_HOSTS = getattr(configuration, "ALLOWED_HOSTS")
+DATABASE = getattr(configuration, "DATABASE")
+SECRET_KEY = getattr(configuration, "SECRET_KEY")
+MY_ASN = getattr(configuration, "MY_ASN")
 
 CSRF_TRUSTED_ORIGINS = ALLOWED_HOSTS
 
@@ -99,6 +102,8 @@ if BASE_PATH:
     BASE_PATH = BASE_PATH.strip("/") + "/"  # Enforce trailing slash only
 DEBUG = getattr(configuration, "DEBUG", False)
 LOGGING = getattr(configuration, "LOGGING", DEFAULT_LOGGING)
+REDIS = getattr(configuration, "REDIS", {})
+CACHE_TIMEOUT = getattr(configuration, "CACHE_TIMEOUT", 0)
 CHANGELOG_RETENTION = getattr(configuration, "CHANGELOG_RETENTION", 90)
 LOGIN_REQUIRED = getattr(configuration, "LOGIN_REQUIRED", False)
 NAPALM_USERNAME = getattr(configuration, "NAPALM_USERNAME", "")
@@ -106,7 +111,14 @@ NAPALM_PASSWORD = getattr(configuration, "NAPALM_PASSWORD", "")
 NAPALM_TIMEOUT = getattr(configuration, "NAPALM_TIMEOUT", 30)
 NAPALM_ARGS = getattr(configuration, "NAPALM_ARGS", {})
 PAGINATE_COUNT = getattr(configuration, "PAGINATE_COUNT", 20)
-TIME_ZONE = getattr(configuration, "TIME_ZONE", "UTC")
+
+try:
+    TZ_FILE = open("/etc/timezone", "r")
+    BASE_TZ = TZ_FILE.read()
+except IOError:
+    BASE_TZ = "UTC"
+
+TIME_ZONE = getattr(configuration, "TIME_ZONE", BASE_TZ)
 EMAIL = getattr(configuration, "EMAIL", {})
 BGPQ3_PATH = getattr(configuration, "BGPQ3_PATH", "bgpq3")
 BGPQ3_HOST = getattr(configuration, "BGPQ3_HOST", "rr.ntt.net")
@@ -190,11 +202,62 @@ if LDAP_CONFIGURED:
             "LDAP authentication has been configured, but django-auth-ldap is not installed. You can remove peering_manager/ldap_config.py to disable LDAP."
         )
 
+try:
+    from peering_manager.radius_config import *
+
+    RADIUS_CONFIGURED = True
+except ImportError:
+    RADIUS_CONFIGURED = False
+
+if RADIUS_CONFIGURED:
+    try:
+        import radiusauth
+
+        # Prepend RADIUSBackend to the default ModelBackend
+        AUTHENTICATION_BACKENDS = [
+            "radiusauth.backends.RADIUSBackend",
+            "django.contrib.auth.backends.ModelBackend",
+        ]
+    except ImportError:
+        raise ImproperlyConfigured(
+            "RADIUS authentication has been configured, but django-radius is not installed. You can remove peering_manager/radius_config.py to disable RADIUS."
+        )
+
 
 # Force PostgreSQL to be used as database backend
 configuration.DATABASE.update({"ENGINE": "django.db.backends.postgresql"})
 # Actually set the database's settings
 DATABASES = {"default": configuration.DATABASE}
+
+
+# Redis
+if REDIS:
+    REDIS_HOST = REDIS.get("HOST", "localhost")
+    REDIS_PORT = REDIS.get("PORT", 6379)
+    REDIS_PASSWORD = REDIS.get("PASSWORD", "")
+    REDIS_CACHE_DATABASE = REDIS.get("CACHE_DATABASE", 1)
+    REDIS_DEFAULT_TIMEOUT = REDIS.get("DEFAULT_TIMEOUT", 300)
+    REDIS_SSL = REDIS.get("SSL", False)
+
+    # Caching
+    CACHEOPS_ENABLED = CACHE_TIMEOUT > 0
+    CACHEOPS_REDIS = "rediss://" if REDIS_SSL else "redis://"
+    if REDIS_PASSWORD:
+        CACHEOPS_REDIS = "{}:{}@".format(CACHEOPS_REDIS, REDIS_PASSWORD)
+    CACHEOPS_REDIS = "{}{}:{}/{}".format(
+        CACHEOPS_REDIS, REDIS_HOST, REDIS_PORT, REDIS_CACHE_DATABASE
+    )
+    CACHEOPS_DEFAULTS = {"timeout": CACHE_TIMEOUT}
+    CACHEOPS = {
+        "auth.user": {"ops": "get", "timeout": 900},
+        "auth.*": {"ops": ("fetch", "get")},
+        "auth.permission": {"ops": "all"},
+        "peering.*": {"ops": "all"},
+        "peeringdb.*": {"ops": "all"},
+        "users.*": {"ops": "all"},
+        "utils.*": {"ops": "all"},
+    }
+    CACHEOPS_DEGRADE_ON_FAILURE = True
 
 
 # Email
@@ -216,6 +279,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "cacheops",
     "django_filters",
     "django_tables2",
     "rest_framework",
